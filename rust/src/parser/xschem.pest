@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: Apache-2.0
+// Xschem .sch/.sym grammar for pest
+
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+
+// ─── Top level ───────────────────────────────────────────────────────────────
+
+schematic = { SOI ~ version? ~ object* ~ EOI }
+
+version = {
+    "v" ~ "{" ~ "xschem" ~ "version=" ~ version_number
+        ~ "file_version=" ~ version_number
+        ~ license_text
+        ~ "}"
+}
+
+version_number = @{ (ASCII_DIGIT | ".")+ ~ (ASCII_ALPHANUMERIC)* }
+
+license_text = @{ (!"}" ~ ANY)* }
+
+// ─── Objects ─────────────────────────────────────────────────────────────────
+
+object = _{
+    line_obj
+  | rectangle_obj
+  | arc_obj
+  | text_obj
+  | polygon_obj
+  | wire_obj
+  | component_obj
+  | spice_obj
+  | verilog_obj
+  | spectre_obj
+  | vhdl_obj
+  | tedax_obj
+  | global_props_obj
+  | embedded_symbol
+}
+
+line_obj      = { "L" ~ integer ~ coordinate ~ coordinate ~ coordinate ~ coordinate ~ properties }
+rectangle_obj = { "B" ~ integer ~ coordinate ~ coordinate ~ coordinate ~ coordinate ~ properties }
+arc_obj       = { "A" ~ integer ~ coordinate ~ coordinate ~ coordinate ~ float ~ float ~ properties }
+text_obj      = { "T" ~ curly_string ~ coordinate ~ coordinate ~ integer ~ integer ~ float ~ float ~ properties }
+wire_obj      = { "N" ~ coordinate ~ coordinate ~ coordinate ~ coordinate ~ properties }
+component_obj = { "C" ~ curly_string ~ coordinate ~ coordinate ~ integer ~ integer ~ properties }
+polygon_obj   = { "P" ~ integer ~ integer ~ coordinate_pair+ ~ properties }
+
+spice_obj     = { "S" ~ curly_string }
+verilog_obj   = { "V" ~ curly_string }
+spectre_obj   = { "F" ~ curly_string }
+vhdl_obj      = { "G" ~ curly_string }
+tedax_obj     = { "E" ~ curly_string }
+
+global_props_obj = { "K" ~ properties }
+
+embedded_symbol = { "[" ~ version? ~ object* ~ "]" }
+
+// ─── Curly-braced string ─────────────────────────────────────────────────────
+
+curly_string = ${ "{" ~ curly_inner ~ "}" }
+curly_inner  = @{ curly_char* }
+curly_char   = _{
+    "\\" ~ ("\\" | "{" | "}")
+  | (!("{" | "}" | "\\") ~ ANY)
+}
+
+// ─── Properties ──────────────────────────────────────────────────────────────
+
+properties = { "{" ~ pair* ~ "}" }
+
+pair = { prop_key ~ ("=" ~ prop_value)? }
+
+prop_key = @{ (!(WHITESPACE | "=" | "}" | ";" | "\\") ~ ANY)+ }
+
+prop_value = { quoted_string | literal_string }
+
+quoted_string  = @{ "\"" ~ (string_escape | string_char)* ~ "\"" }
+string_escape  = @{ "\\\\" ~ "\"" | "\\" ~ ANY }
+string_char    = @{ (!"\"" ~ !"\\" ~ ANY)+ }
+
+literal_string = @{ (lit_escape | lit_char)+ }
+lit_escape     = @{ "\\" ~ ANY }
+lit_char       = @{ (!(WHITESPACE | "{" | "}") ~ ANY) }
+
+// ─── Primitives ──────────────────────────────────────────────────────────────
+
+coordinate_pair = { float ~ float }
+
+coordinate = { float }
+
+float = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+
+integer = @{ "-"? ~ ASCII_DIGIT+ }
