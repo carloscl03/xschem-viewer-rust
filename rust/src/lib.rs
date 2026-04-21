@@ -1,8 +1,10 @@
 pub mod models;
+pub mod netlist;
 pub mod parser;
 pub mod renderer;
 
 pub use models::Schematic;
+pub use netlist::{extract_netlist, Instance, Net, Netlist, Pin};
 pub use renderer::{Renderer, RenderOptions, RenderResult};
 
 /// One-shot: parse + render en una sola llamada.
