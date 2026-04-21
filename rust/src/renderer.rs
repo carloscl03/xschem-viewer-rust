@@ -21,6 +21,11 @@ impl RenderOptions {
     pub fn light() -> Self {
         Self { colors: light_theme(), symbol_paths: vec![] }
     }
+
+    pub fn with_sym_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.symbol_paths.push(path.into());
+        self
+    }
 }
 
 #[derive(Clone, Copy)]
