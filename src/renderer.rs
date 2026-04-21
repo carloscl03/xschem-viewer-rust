@@ -51,12 +51,19 @@ impl RenderOptions {
 /// standard OpenPDK layout), falling back to direct `XSCHEM_LIBRARY_PATH`
 /// entries when PDK_ROOT/PDK are not set.
 fn xschemrc_sym_paths() -> Vec<std::path::PathBuf> {
-    let rc_path = find_xschemrc();
-    let content = match rc_path.and_then(|p| std::fs::read_to_string(p).ok()) {
-        Some(c) => c,
-        None => return vec![],
-    };
-    parse_xschemrc_paths(&content)
+    let mut paths = Vec::new();
+    if let Some(rc_path) = find_xschemrc() {
+        if let Ok(content) = std::fs::read_to_string(rc_path) {
+            paths.extend(parse_xschemrc_paths(&content));
+        }
+    }
+    if let Ok(tools) = std::env::var("TOOLS") {
+        let devices = std::path::PathBuf::from(tools).join("xschem").join("share").join("xschem").join("xschem_library").join("devices");
+        if devices.exists() && !paths.contains(&devices) {
+            paths.push(devices);
+        }
+    }
+    paths
 }
 
 fn find_xschemrc() -> Option<std::path::PathBuf> {
