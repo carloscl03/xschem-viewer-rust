@@ -29,4 +29,7 @@ serde_json = "1.0"
 # SVG generation
 svg = "0.17"
 
+# Home directory detection (for xschemrc lookup)
+dirs = "6.0"
+
 [dev-dependencies]

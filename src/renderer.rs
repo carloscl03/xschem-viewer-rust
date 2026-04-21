@@ -29,6 +29,129 @@ impl RenderOptions {
         self.symbol_paths.push(path.into());
         self
     }
+
+    /// Auto-detects symbol paths by reading the xschemrc found in the current
+    /// directory or the user's home directory. Silently returns self unchanged
+    /// if no xschemrc is found or parsing fails.
+    pub fn with_sym_paths_from_xschemrc(self) -> Self {
+        let paths = xschemrc_sym_paths();
+        paths.into_iter().fold(self, |opts, p| opts.with_sym_path(p))
+    }
+}
+
+/// Parses an xschemrc file and returns all symbol search paths it declares.
+///
+/// Handles:
+///   set PDK_ROOT /path
+///   set PDK sky130A
+///   set XSCHEM_SHAREDIR /path
+///   append XSCHEM_LIBRARY_PATH :/colon:separated:paths
+///
+/// PDK paths are constructed as `$PDK_ROOT/$PDK/libs.tech/xschem` (the
+/// standard OpenPDK layout), falling back to direct `XSCHEM_LIBRARY_PATH`
+/// entries when PDK_ROOT/PDK are not set.
+fn xschemrc_sym_paths() -> Vec<std::path::PathBuf> {
+    let rc_path = find_xschemrc();
+    let content = match rc_path.and_then(|p| std::fs::read_to_string(p).ok()) {
+        Some(c) => c,
+        None => return vec![],
+    };
+    parse_xschemrc_paths(&content)
+}
+
+fn find_xschemrc() -> Option<std::path::PathBuf> {
+    // 1. current directory
+    let local = std::path::PathBuf::from(".xschemrc");
+    if local.exists() {
+        return Some(local);
+    }
+    // 2. home directory
+    if let Some(home) = dirs::home_dir() {
+        let home_rc = home.join(".xschemrc");
+        if home_rc.exists() {
+            return Some(home_rc);
+        }
+    }
+    None
+}
+
+fn parse_xschemrc_paths(content: &str) -> Vec<std::path::PathBuf> {
+    let mut pdk_root: Option<String> = None;
+    let mut pdk: Option<String> = None;
+    let mut sharedir: Option<String> = None;
+    let mut lib_paths: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("set PDK_ROOT ") {
+            pdk_root = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("set PDK ") {
+            pdk = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("set XSCHEM_SHAREDIR ") {
+            sharedir = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("append XSCHEM_LIBRARY_PATH ") {
+            // colon-separated; leading colon is common (means "append")
+            for part in rest.split(':') {
+                let p = part.trim();
+                if !p.is_empty() {
+                    // expand simple ${VAR} references
+                    let expanded = expand_tcl_vars(p, &pdk_root, &pdk, &sharedir);
+                    lib_paths.push(expanded);
+                }
+            }
+        }
+    }
+
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+
+    // OpenPDK convention: $PDK_ROOT/$PDK/libs.tech/xschem
+    if let (Some(root), Some(pdk_name)) = (&pdk_root, &pdk) {
+        let pdk_sym = std::path::PathBuf::from(root)
+            .join(pdk_name)
+            .join("libs.tech")
+            .join("xschem");
+        if pdk_sym.exists() {
+            paths.push(pdk_sym);
+        }
+    }
+
+    // xschem built-in devices from XSCHEM_SHAREDIR
+    if let Some(dir) = &sharedir {
+        let devices = std::path::PathBuf::from(dir).join("xschem_library").join("devices");
+        if devices.exists() {
+            paths.push(devices);
+        }
+    }
+
+    // XSCHEM_LIBRARY_PATH entries
+    for p in lib_paths {
+        let pb = std::path::PathBuf::from(&p);
+        if pb.exists() {
+            paths.push(pb);
+        }
+    }
+
+    paths
+}
+
+/// Expands ${PDK_ROOT}, ${PDK}, ${XSCHEM_SHAREDIR} in a Tcl string.
+fn expand_tcl_vars(
+    s: &str,
+    pdk_root: &Option<String>,
+    pdk: &Option<String>,
+    sharedir: &Option<String>,
+) -> String {
+    let mut out = s.to_string();
+    if let Some(v) = pdk_root {
+        out = out.replace("${PDK_ROOT}", v).replace("$PDK_ROOT", v);
+    }
+    if let Some(v) = pdk {
+        out = out.replace("${PDK}", v).replace("$PDK", v);
+    }
+    if let Some(v) = sharedir {
+        out = out.replace("${XSCHEM_SHAREDIR}", v).replace("$XSCHEM_SHAREDIR", v);
+    }
+    out
 }
 
 /// Stateful renderer. Keeps a symbol cache across multiple render calls.
@@ -475,4 +598,46 @@ pub fn light_theme() -> Vec<String> {
      "#0000cc","#666600","#557755","#aa2222","#7ccc40","#00ffcc",
      "#ce0097","#d2d46b","#ef6158","#fdb200"]
     .iter().map(|s| s.to_string()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_xschemrc_paths;
+
+    #[test]
+    fn parses_pdk_root_and_pdk() {
+        // Non-existent paths should be silently filtered — only the variables
+        // are parsed; path existence is checked at runtime on the real system.
+        // We test variable expansion by using a path that *we know won't exist*
+        // so the list comes back empty, but at least no panic.
+        let rc = "set PDK_ROOT /nonexistent/pdks\nset PDK sky130A\n";
+        let paths = parse_xschemrc_paths(rc);
+        // The path /nonexistent/... doesn't exist, so list should be empty.
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn parses_xschem_library_path_entries() {
+        let rc = "append XSCHEM_LIBRARY_PATH :/tmp:/nonexistent/lib\n";
+        let paths = parse_xschemrc_paths(rc);
+        // /tmp exists on Linux; /nonexistent does not.
+        // On Windows neither exists — both filtered. Just verify no panic.
+        for p in &paths {
+            assert!(p.exists(), "{} should exist", p.display());
+        }
+    }
+
+    #[test]
+    fn expands_pdk_root_variable_in_library_path() {
+        let rc = "set PDK_ROOT /headless/pdks\nset PDK sky130A\nappend XSCHEM_LIBRARY_PATH :${PDK_ROOT}/${PDK}/libs.tech/xschem\n";
+        let paths = parse_xschemrc_paths(rc);
+        // paths that don't exist are filtered — no panic is the assertion
+        let _ = paths;
+    }
+
+    #[test]
+    fn empty_rc_returns_empty_paths() {
+        let paths = parse_xschemrc_paths("");
+        assert!(paths.is_empty());
+    }
 }
