@@ -33,19 +33,29 @@ impl RenderOptions {
 
 /// Stateful renderer. Keeps a symbol cache across multiple render calls.
 /// If you render several schematics from the same PDK, symbols are parsed only once.
+pub struct RenderResult {
+    pub svg: String,
+    /// Symbols that could not be resolved. Empty when all symbols were found.
+    pub missing_symbols: Vec<String>,
+}
+
 pub struct Renderer {
     opts: RenderOptions,
     sym_cache: HashMap<String, Arc<Vec<Object>>>,
+    /// Symbols that were requested but not found in any sym_path.
+    missing: Vec<String>,
 }
 
 impl Renderer {
     pub fn new(opts: RenderOptions) -> Self {
-        Self { opts, sym_cache: HashMap::new() }
+        Self { opts, sym_cache: HashMap::new(), missing: Vec::new() }
     }
 
-    pub fn render(&mut self, content: &str) -> Result<String, String> {
+    pub fn render(&mut self, content: &str) -> Result<RenderResult, String> {
+        self.missing.clear();
         let schematic = parser::parse(content)?;
-        Ok(self.render_schematic(&schematic))
+        let svg = self.render_schematic(&schematic);
+        Ok(RenderResult { svg, missing_symbols: self.missing.clone() })
     }
 
     fn render_schematic(&mut self, schematic: &Schematic) -> String {
@@ -241,6 +251,10 @@ impl Renderer {
                         self.render_object(obj, buf, bbox, &comp_props, child_gt);
                     }
                 } else {
+                    // Track missing symbol for caller diagnostics
+                    if !self.missing.contains(&sym_file) {
+                        self.missing.push(sym_file.clone());
+                    }
                     // placeholder
                     let stroke = color(&self.opts, layers::SYMBOL);
                     let fill = color(&self.opts, layers::TEXT);
@@ -296,6 +310,7 @@ pub fn render_to_svg(schematic: &Schematic, opts: &RenderOptions) -> String {
     let mut renderer = Renderer {
         opts: RenderOptions { colors: opts.colors.clone(), symbol_paths: opts.symbol_paths.clone() },
         sym_cache: HashMap::new(),
+        missing: Vec::new(),
     };
     renderer.render_schematic(schematic)
 }

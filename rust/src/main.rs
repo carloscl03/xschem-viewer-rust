@@ -5,6 +5,8 @@ mod models;
 mod parser;
 mod renderer;
 
+use renderer::{RenderOptions, Renderer};
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -15,62 +17,40 @@ fn main() -> ExitCode {
     let path = PathBuf::from(&args[1]);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error reading {:?}: {e}", path);
-            return ExitCode::from(1);
-        }
+        Err(e) => { eprintln!("Error reading {path:?}: {e}"); return ExitCode::from(1); }
     };
 
     let mut output: Option<PathBuf> = None;
-    let mut light = false;
-    let mut sym_paths: Vec<PathBuf> = vec![];
+    let mut opts = RenderOptions::dark();
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
-            "--output" | "-o" => {
-                i += 1;
-                if let Some(p) = args.get(i) {
-                    output = Some(PathBuf::from(p));
-                }
-            }
-            "--light" => light = true,
-            "--sym-path" => {
-                i += 1;
-                if let Some(p) = args.get(i) {
-                    sym_paths.push(PathBuf::from(p));
-                }
-            }
+            "--output" | "-o" => { i += 1; if let Some(p) = args.get(i) { output = Some(p.into()); } }
+            "--light" => opts = RenderOptions::light(),
+            "--sym-path" => { i += 1; if let Some(p) = args.get(i) { opts = opts.with_sym_path(p); } }
             _ => {}
         }
         i += 1;
     }
 
-    let schematic = match parser::parse(&content) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Parse error: {e}");
-            return ExitCode::from(1);
-        }
+    let result = match Renderer::new(opts).render(&content) {
+        Ok(r) => r,
+        Err(e) => { eprintln!("Error: {e}"); return ExitCode::from(1); }
     };
 
-    let wires = schematic.wires().count();
-    let components = schematic.components().count();
-    eprintln!("Parsed: {wires} wires, {components} components");
-
-    let mut opts = if light { renderer::RenderOptions::light() } else { renderer::RenderOptions::dark() };
-    opts.symbol_paths = sym_paths;
-
-    let svg = renderer::render_to_svg(&schematic, &opts);
+    for sym in &result.missing_symbols {
+        eprintln!("warning: symbol not found: {sym}");
+    }
 
     match output {
-        Some(out_path) => {
-            if let Err(e) = std::fs::write(&out_path, &svg) {
-                eprintln!("Error writing {:?}: {e}", out_path);
+        Some(out) => {
+            if let Err(e) = std::fs::write(&out, &result.svg) {
+                eprintln!("Error writing {out:?}: {e}");
                 return ExitCode::from(1);
             }
-            println!("SVG written to {:?}", out_path);
+            eprintln!("SVG written to {out:?}");
         }
-        None => print!("{svg}"),
+        None => print!("{}", result.svg),
     }
 
     ExitCode::SUCCESS

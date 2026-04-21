@@ -9,6 +9,9 @@ use crate::models::{
     Wire,
 };
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Parser)]
 #[grammar = "parser/xschem.pest"]
 struct XschemParser;
