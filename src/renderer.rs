@@ -57,6 +57,14 @@ fn xschemrc_sym_paths() -> Vec<std::path::PathBuf> {
             paths.extend(parse_xschemrc_paths(&content));
         }
     }
+    // PDK_ROOT + PDK env vars (standard OpenPDK layout)
+    if let (Ok(root), Ok(pdk)) = (std::env::var("PDK_ROOT"), std::env::var("PDK")) {
+        let pdk_path = std::path::PathBuf::from(&root).join(&pdk).join("libs.tech").join("xschem");
+        if pdk_path.exists() && !paths.contains(&pdk_path) {
+            paths.push(pdk_path);
+        }
+    }
+    // TOOLS env var (iic-osic-tools layout) — native devices
     if let Ok(tools) = std::env::var("TOOLS") {
         let devices = std::path::PathBuf::from(tools).join("xschem").join("share").join("xschem").join("xschem_library").join("devices");
         if devices.exists() && !paths.contains(&devices) {
@@ -416,8 +424,13 @@ impl Renderer {
         }
 
         let filename = sym_file.split('/').last().unwrap_or(sym_file);
+        let no_slash = !sym_file.contains('/');
         for base in &self.opts.symbol_paths {
-            let candidates = [base.join(sym_file), base.join(filename)];
+            let mut candidates = vec![base.join(sym_file), base.join(filename)];
+            // Mirror TypeScript fallback: bare names (no '/') are also tried under devices/
+            if no_slash {
+                candidates.push(base.join("devices").join(filename));
+            }
             for candidate in &candidates {
                 if let Ok(content) = std::fs::read_to_string(candidate) {
                     if let Ok(sch) = parser::parse(&content) {
