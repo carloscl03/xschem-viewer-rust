@@ -61,6 +61,8 @@ pub struct SceneBuilder<'a> {
     bbox: BoundingBox,
     missing: Vec<String>,
     wires: Vec<(f64, f64, f64, f64)>,
+    /// Posiciones de pines en espacio mundo. Clave: nombre de instancia.
+    pin_positions: HashMap<String, Vec<(String, f64, f64)>>,
 }
 
 impl<'a> SceneBuilder<'a> {
@@ -72,6 +74,7 @@ impl<'a> SceneBuilder<'a> {
             bbox: BoundingBox::default(),
             missing: Vec::new(),
             wires: Vec::new(),
+            pin_positions: HashMap::new(),
         }
     }
 
@@ -82,6 +85,7 @@ impl<'a> SceneBuilder<'a> {
             bbox: self.bbox,
             missing_symbols: self.missing,
             wires: self.wires,
+            pin_positions: self.pin_positions,
         }
     }
 
@@ -222,23 +226,38 @@ impl<'a> SceneBuilder<'a> {
                     format!("{}.sym", c.symbol_reference)
                 };
 
+                let sym_name = c.symbol_reference.split('/').last()
+                    .and_then(|s| s.split('.').next())
+                    .unwrap_or(c.symbol_reference.as_str());
+
+                // Detección de pin: ipin/opin/iopin dentro de un símbolo padre.
+                // El lab= de este componente es el nombre del pin.
+                // La posición en espacio mundo es la del componente padre + offset de este sub-componente.
+                if let Some(parent_instance) = component_id {
+                    if matches!(sym_name, "ipin" | "opin" | "iopin") {
+                        if let Some(lab) = c.properties.get("lab") {
+                            if !lab.is_empty() {
+                                let (px, py) = gt.apply(c.x, c.y);
+                                self.pin_positions
+                                    .entry(parent_instance.to_owned())
+                                    .or_default()
+                                    .push((lab.clone(), px, py));
+                            }
+                        }
+                        // Los pines no necesitan recursión — son símbolos simples (flecha).
+                        // Igualmente los visitamos para renderizar la flecha.
+                    }
+                }
+
                 // El id del componente es el valor de la propiedad `name`, si existe;
                 // si no, usamos el nombre del símbolo como fallback.
                 let cid = c.properties.get("name")
                     .cloned()
-                    .unwrap_or_else(|| {
-                        c.symbol_reference.split('/').last()
-                            .and_then(|s| s.split('.').next())
-                            .unwrap_or(&c.symbol_reference)
-                            .to_owned()
-                    });
+                    .unwrap_or_else(|| sym_name.to_owned());
 
                 let child_gt = gt.child(c.x, c.y, c.rotation, c.flip != 0);
 
                 let mut comp_props = c.properties.clone();
-                let sym_name = c.symbol_reference.split('/').last()
-                    .and_then(|s| s.split('.').next())
-                    .unwrap_or(c.symbol_reference.as_str());
                 comp_props.insert("symname".into(), sym_name.into());
                 comp_props.entry("spice_get_voltage".into()).or_default();
                 comp_props.entry("spice_get_current".into()).or_default();

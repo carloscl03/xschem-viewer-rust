@@ -5,7 +5,7 @@ pub mod renderer;
 pub mod scene;
 
 pub use models::{BoundingBox, DrawElement, ResolvedScene, Schematic};
-pub use netlist::{extract_netlist, Instance, Net, Netlist, Pin};
+pub use netlist::{extract_netlist, fill_connectivity, Instance, Net, Netlist, Pin};
 pub use renderer::{dark_theme, light_theme, Renderer, RenderOptions, RenderResult};
 pub use scene::SceneBuilder;
 

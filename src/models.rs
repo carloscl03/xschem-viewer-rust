@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub type Properties = BTreeMap<String, String>;
 
@@ -106,6 +106,11 @@ pub struct ResolvedScene {
     /// Separados de elements para que el backend pueda calcular junctions
     /// sin distinguir wires de líneas de símbolo por layer.
     pub wires: Vec<(f64, f64, f64, f64)>,
+    /// Posiciones de pines en espacio de mundo por instancia.
+    /// Clave: nombre de instancia (propiedad `name`).
+    /// Valor: lista de (nombre_del_pin, x, y).
+    /// Usada para conectar pins a nets por matching geométrico con endpoints de wires.
+    pub pin_positions: HashMap<String, Vec<(String, f64, f64)>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
