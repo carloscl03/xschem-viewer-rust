@@ -52,9 +52,14 @@ pub enum DrawElement {
         x: f64,
         y: f64,
         content: String,
-        size: f64,
+        v_size: f64,
+        h_size: f64,
         /// 0–3 en pasos de 90°
         rotation: i32,
+        /// 0 o 1 — flip horizontal explícito
+        mirror: i32,
+        h_center: bool,
+        v_center: bool,
         layer: i32,
         component_id: Option<String>,
     },

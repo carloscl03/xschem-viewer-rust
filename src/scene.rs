@@ -208,10 +208,17 @@ impl<'a> SceneBuilder<'a> {
                 let layer = t.properties.get("layer")
                     .and_then(|s| s.parse::<i32>().ok())
                     .unwrap_or(3);
+                let h_center = t.properties.get("hcenter").map(|s| s == "true").unwrap_or(false);
+                let v_center = t.properties.get("vcenter").map(|s| s == "true").unwrap_or(false);
+                let mirror = if gt.flip { 1 - t.mirror } else { t.mirror };
                 self.elements.push(DrawElement::Text {
                     x, y, content,
-                    size: t.v_size,
+                    v_size: t.v_size,
+                    h_size: t.h_size,
                     rotation: combined_rotation,
+                    mirror,
+                    h_center,
+                    v_center,
                     layer,
                     component_id: component_id.map(str::to_owned),
                 });

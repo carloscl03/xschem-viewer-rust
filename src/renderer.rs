@@ -128,17 +128,28 @@ fn render_element(elem: &DrawElement, buf: &mut String, opts: &RenderOptions) {
                 r#"<polygon points="{pts}" fill="{fill}" stroke="{stroke}"/>"#);
         }
 
-        DrawElement::Text { x, y, content, size, rotation, layer, .. } => {
+        DrawElement::Text { x, y, content, v_size, rotation, mirror, h_center, v_center, layer, .. } => {
             let fill = color(opts, *layer as usize);
-            let font_size = size * FONT_SCALE;
-            let escaped = escape_xml(content);
-            let transform = if *rotation != 0 {
-                format!(r#" transform="translate({x},{y}) rotate({})""#, rotation * 90)
-            } else {
-                format!(r#" transform="translate({x},{y})""#)
-            };
-            let _ = write!(buf,
-                r#"<text{transform} font-size="{font_size}" fill="{fill}" alignment-baseline="before-edge">{escaped}</text>"#);
+            let font_size = v_size * FONT_SCALE;
+            let v_mirror = *rotation == 1 || *rotation == 2;
+            let h_mirror = if *mirror == 1 { !v_mirror } else { v_mirror };
+            let text_anchor = if *h_center { "middle" } else if h_mirror { "end" } else { "start" };
+            let baseline = if *v_center { "middle" } else if v_mirror { "after-edge" } else { "before-edge" };
+            let lines: Vec<&str> = content.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let line_index = if v_mirror { lines.len() - 1 - i } else { i } as f64;
+                let dy = line_index * v_size * FONT_SCALE;
+                let mut transforms = vec![format!("translate({x},{y})")];
+                if *rotation != 0 { transforms.push(format!("rotate({})", rotation * 90)); }
+                if *mirror == 1 { transforms.push("scale(-1,1)".to_owned()); }
+                transforms.push(format!("translate(0,{dy})"));
+                if v_mirror { transforms.push("scale(1,-1)".to_owned()); }
+                if h_mirror { transforms.push("scale(-1,1)".to_owned()); }
+                let transform = transforms.join(" ");
+                let escaped = escape_xml(line);
+                let _ = write!(buf,
+                    r#"<text transform="{transform}" font-size="{font_size}" fill="{fill}" text-anchor="{text_anchor}" alignment-baseline="{baseline}">{escaped}</text>"#);
+            }
         }
 
         DrawElement::MissingSymbol { name, x, y, .. } => {
