@@ -60,6 +60,7 @@ pub struct SceneBuilder<'a> {
     elements: Vec<DrawElement>,
     bbox: BoundingBox,
     missing: Vec<String>,
+    wires: Vec<(f64, f64, f64, f64)>,
 }
 
 impl<'a> SceneBuilder<'a> {
@@ -70,6 +71,7 @@ impl<'a> SceneBuilder<'a> {
             elements: Vec::new(),
             bbox: BoundingBox::default(),
             missing: Vec::new(),
+            wires: Vec::new(),
         }
     }
 
@@ -79,6 +81,7 @@ impl<'a> SceneBuilder<'a> {
             elements: self.elements,
             bbox: self.bbox,
             missing_symbols: self.missing,
+            wires: self.wires,
         }
     }
 
@@ -106,6 +109,10 @@ impl<'a> SceneBuilder<'a> {
                 let (x1, y1) = gt.apply(w.x1, w.y1);
                 let (x2, y2) = gt.apply(w.x2, w.y2);
                 self.bbox.expand_rect(x1, y1, x2, y2);
+                // Solo los wires del schematic raíz participan en junction detection
+                if component_id.is_none() {
+                    self.wires.push((x1, y1, x2, y2));
+                }
                 self.elements.push(DrawElement::Line {
                     x1, y1, x2, y2,
                     layer: 1,

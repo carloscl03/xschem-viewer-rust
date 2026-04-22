@@ -102,6 +102,10 @@ pub struct ResolvedScene {
     pub bbox: BoundingBox,
     /// Símbolos que no pudieron resolverse (nombres únicos).
     pub missing_symbols: Vec<String>,
+    /// Coordenadas de wires del schematic raíz (x1,y1,x2,y2).
+    /// Separados de elements para que el backend pueda calcular junctions
+    /// sin distinguir wires de líneas de símbolo por layer.
+    pub wires: Vec<(f64, f64, f64, f64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

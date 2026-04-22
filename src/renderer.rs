@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 
-use crate::models::{DrawElement, ResolvedScene, Schematic, Wire};
+use crate::models::{DrawElement, ResolvedScene};
 use crate::parser;
 use crate::scene::{arc_endpoints, SceneBuilder};
 
@@ -65,9 +65,8 @@ impl Renderer {
     /// Shortcut: parse + resolve + SVG en una sola llamada.
     pub fn render(&self, content: &str) -> Result<RenderResult, String> {
         let scene = self.resolve(content)?;
-        let schematic = parser::parse(content)?;
         let missing = scene.missing_symbols.clone();
-        let svg = scene_to_svg(&scene, &schematic, &self.opts);
+        let svg = scene_to_svg(&scene, &self.opts);
         Ok(RenderResult { svg, missing_symbols: missing })
     }
 }
@@ -75,17 +74,14 @@ impl Renderer {
 // ─── SVG backend ─────────────────────────────────────────────────────────────
 
 /// Convierte una `ResolvedScene` a SVG.
-/// Recibe también el `Schematic` original para calcular junctions de wires.
-pub fn scene_to_svg(scene: &ResolvedScene, schematic: &Schematic, opts: &RenderOptions) -> String {
+pub fn scene_to_svg(scene: &ResolvedScene, opts: &RenderOptions) -> String {
     let mut buf = String::new();
 
     for elem in &scene.elements {
         render_element(elem, &mut buf, opts);
     }
 
-    // Junctions: necesitan los wires originales (no se pierden en la escena)
-    let wires: Vec<&Wire> = schematic.wires().collect();
-    render_junctions(&wires, &mut buf, opts);
+    render_junctions(&scene.wires, &mut buf, opts);
 
     wrap_svg(buf, &scene.bbox, opts)
 }
@@ -161,27 +157,19 @@ fn render_element(elem: &DrawElement, buf: &mut String, opts: &RenderOptions) {
 
 // ─── Convenience function ─────────────────────────────────────────────────────
 
-/// One-shot: parse + resolve + SVG. Para múltiples renders del mismo PDK usa `Renderer`.
-pub fn render_to_svg(schematic: &Schematic, opts: &RenderOptions) -> String {
-    let dummy_content = "";
+/// One-shot: render desde un `Schematic` ya parseado. Para múltiples renders usa `Renderer`.
+pub fn render_to_svg(schematic: &crate::models::Schematic, opts: &RenderOptions) -> String {
     let scene = SceneBuilder::new(opts).build(schematic);
-    let svg_body = {
-        let mut buf = String::new();
-        for elem in &scene.elements {
-            render_element(elem, &mut buf, opts);
-        }
-        buf
-    };
-    wrap_svg(svg_body, &scene.bbox, opts)
+    scene_to_svg(&scene, opts)
 }
 
 // ─── Junctions ───────────────────────────────────────────────────────────────
 
-fn render_junctions(wires: &[&Wire], buf: &mut String, opts: &RenderOptions) {
+fn render_junctions(wires: &[(f64, f64, f64, f64)], buf: &mut String, opts: &RenderOptions) {
     let mut endpoint_count: HashMap<(i64, i64), usize> = HashMap::new();
-    for w in wires {
-        *endpoint_count.entry(to_key(w.x1, w.y1)).or_insert(0) += 1;
-        *endpoint_count.entry(to_key(w.x2, w.y2)).or_insert(0) += 1;
+    for &(x1, y1, x2, y2) in wires {
+        *endpoint_count.entry(to_key(x1, y1)).or_insert(0) += 1;
+        *endpoint_count.entry(to_key(x2, y2)).or_insert(0) += 1;
     }
 
     let mut junctions: HashSet<(i64, i64)> = endpoint_count
@@ -190,14 +178,13 @@ fn render_junctions(wires: &[&Wire], buf: &mut String, opts: &RenderOptions) {
         .map(|(&k, _)| k)
         .collect();
 
-    for w in wires {
-        for other in wires {
-            if std::ptr::eq(*w, *other) { continue; }
-            if is_point_inside_wire(other.x1, other.y1, w) {
-                junctions.insert(to_key(other.x1, other.y1));
+    for &(x1, y1, x2, y2) in wires {
+        for &(ox1, oy1, ox2, oy2) in wires {
+            if is_point_inside_segment(ox1, oy1, x1, y1, x2, y2) {
+                junctions.insert(to_key(ox1, oy1));
             }
-            if is_point_inside_wire(other.x2, other.y2, w) {
-                junctions.insert(to_key(other.x2, other.y2));
+            if is_point_inside_segment(ox2, oy2, x1, y1, x2, y2) {
+                junctions.insert(to_key(ox2, oy2));
             }
         }
     }
@@ -237,11 +224,11 @@ fn to_key(x: f64, y: f64) -> (i64, i64) {
     ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
 }
 
-fn is_point_inside_wire(px: f64, py: f64, wire: &Wire) -> bool {
-    if (px == wire.x1 && py == wire.y1) || (px == wire.x2 && py == wire.y2) {
+fn is_point_inside_segment(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> bool {
+    if (px == x1 && py == y1) || (px == x2 && py == y2) {
         return false;
     }
-    point_to_line_dist(px, py, wire.x1, wire.y1, wire.x2, wire.y2) < 0.01
+    point_to_line_dist(px, py, x1, y1, x2, y2) < 0.01
 }
 
 fn point_to_line_dist(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
