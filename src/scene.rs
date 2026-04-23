@@ -115,7 +115,8 @@ impl<'a> SceneBuilder<'a> {
                 self.bbox.expand_rect(x1, y1, x2, y2);
                 // Solo los wires del schematic raíz participan en junction detection
                 if component_id.is_none() {
-                    self.wires.push((x1, y1, x2, y2));
+                    let label = w.properties.get("lab").cloned();
+                    self.wires.push((x1, y1, x2, y2, label));
                 }
                 self.elements.push(DrawElement::Line {
                     x1, y1, x2, y2,

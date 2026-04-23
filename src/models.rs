@@ -107,10 +107,10 @@ pub struct ResolvedScene {
     pub bbox: BoundingBox,
     /// Símbolos que no pudieron resolverse (nombres únicos).
     pub missing_symbols: Vec<String>,
-    /// Coordenadas de wires del schematic raíz (x1,y1,x2,y2).
+    /// Coordenadas de wires del schematic raíz (x1,y1,x2,y2,label).
     /// Separados de elements para que el backend pueda calcular junctions
     /// sin distinguir wires de líneas de símbolo por layer.
-    pub wires: Vec<(f64, f64, f64, f64)>,
+    pub wires: Vec<(f64, f64, f64, f64, Option<String>)>,
     /// Posiciones de pines en espacio de mundo por instancia.
     /// Clave: nombre de instancia (propiedad `name`).
     /// Valor: lista de (nombre_del_pin, x, y).
