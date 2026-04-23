@@ -176,11 +176,11 @@ pub fn render_to_svg(schematic: &crate::models::Schematic, opts: &RenderOptions)
 
 // ─── Junctions ───────────────────────────────────────────────────────────────
 
-fn render_junctions(wires: &[(f64, f64, f64, f64)], buf: &mut String, opts: &RenderOptions) {
+fn render_junctions(wires: &[(f64, f64, f64, f64, Option<String>)], buf: &mut String, opts: &RenderOptions) {
     let mut endpoint_count: HashMap<(i64, i64), usize> = HashMap::new();
-    for &(x1, y1, x2, y2) in wires {
-        *endpoint_count.entry(to_key(x1, y1)).or_insert(0) += 1;
-        *endpoint_count.entry(to_key(x2, y2)).or_insert(0) += 1;
+    for (x1, y1, x2, y2, _) in wires {
+        *endpoint_count.entry(to_key(*x1, *y1)).or_insert(0) += 1;
+        *endpoint_count.entry(to_key(*x2, *y2)).or_insert(0) += 1;
     }
 
     let mut junctions: HashSet<(i64, i64)> = endpoint_count
@@ -189,13 +189,13 @@ fn render_junctions(wires: &[(f64, f64, f64, f64)], buf: &mut String, opts: &Ren
         .map(|(&k, _)| k)
         .collect();
 
-    for &(x1, y1, x2, y2) in wires {
-        for &(ox1, oy1, ox2, oy2) in wires {
-            if is_point_inside_segment(ox1, oy1, x1, y1, x2, y2) {
-                junctions.insert(to_key(ox1, oy1));
+    for (x1, y1, x2, y2, _) in wires {
+        for (ox1, oy1, ox2, oy2, _) in wires {
+            if is_point_inside_segment(*ox1, *oy1, *x1, *y1, *x2, *y2) {
+                junctions.insert(to_key(*ox1, *oy1));
             }
-            if is_point_inside_segment(ox2, oy2, x1, y1, x2, y2) {
-                junctions.insert(to_key(ox2, oy2));
+            if is_point_inside_segment(*ox2, *oy2, *x1, *y1, *x2, *y2) {
+                junctions.insert(to_key(*ox2, *oy2));
             }
         }
     }

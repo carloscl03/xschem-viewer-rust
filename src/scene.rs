@@ -60,7 +60,7 @@ pub struct SceneBuilder<'a> {
     elements: Vec<DrawElement>,
     bbox: BoundingBox,
     missing: Vec<String>,
-    wires: Vec<(f64, f64, f64, f64)>,
+    wires: Vec<(f64, f64, f64, f64, Option<String>)>,
     /// Posiciones de pines en espacio mundo. Clave: nombre de instancia.
     pin_positions: HashMap<String, Vec<(String, f64, f64)>>,
 }
