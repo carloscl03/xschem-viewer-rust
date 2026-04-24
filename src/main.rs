@@ -1,11 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-mod models;
-mod parser;
-mod renderer;
-
-use renderer::{RenderOptions, Renderer};
+use xschem_viewer::{RenderOptions, Renderer};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();

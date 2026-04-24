@@ -9,6 +9,15 @@ pub mod text_layout;
 pub mod theme;
 pub mod viewport;
 
+/// Integración opcional con `viewer-core` (ecosistema Riku). Se compila solo
+/// cuando la feature `viewer-core-compat` está activa, para que el crate
+/// siga siendo autocontenido sin dependencias async por defecto.
+#[cfg(feature = "viewer-core-compat")]
+pub mod viewer_core_adapter;
+
+#[cfg(feature = "viewer-core-compat")]
+pub use viewer_core_adapter::XschemBackend;
+
 pub use error::{Result, XschemError};
 pub use models::{BoundingBox, DrawElement, ResolvedScene, Schematic};
 pub use netlist::{extract_netlist, fill_connectivity, Instance, Net, Netlist, Pin};
