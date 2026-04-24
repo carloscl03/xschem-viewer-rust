@@ -17,11 +17,17 @@ pub struct RenderOptions {
 
 impl RenderOptions {
     pub fn dark() -> Self {
-        Self { colors: dark_theme(), symbol_paths: vec![] }
+        Self { colors: crate::theme::Theme::dark().into_vec(), symbol_paths: vec![] }
     }
 
     pub fn light() -> Self {
-        Self { colors: light_theme(), symbol_paths: vec![] }
+        Self { colors: crate::theme::Theme::light().into_vec(), symbol_paths: vec![] }
+    }
+
+    /// Construye opciones desde un `Theme` estructurado.
+    /// Preferido sobre `dark()/light()` cuando se quiere una paleta custom.
+    pub fn with_theme(theme: crate::theme::Theme) -> Self {
+        Self { colors: theme.into_vec(), symbol_paths: vec![] }
     }
 
     pub fn with_sym_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
@@ -56,14 +62,14 @@ impl Renderer {
 
     /// Resuelve el schematic a una escena de primitivos planos.
     /// La escena puede convertirse a SVG, a egui shapes, o a cualquier otro backend.
-    pub fn resolve(&self, content: &str) -> Result<ResolvedScene, String> {
+    pub fn resolve(&self, content: &str) -> crate::error::Result<ResolvedScene> {
         let schematic = parser::parse(content)?;
         let scene = SceneBuilder::new(&self.opts).build(&schematic);
         Ok(scene)
     }
 
     /// Shortcut: parse + resolve + SVG en una sola llamada.
-    pub fn render(&self, content: &str) -> Result<RenderResult, String> {
+    pub fn render(&self, content: &str) -> crate::error::Result<RenderResult> {
         let scene = self.resolve(content)?;
         let missing = scene.missing_symbols.clone();
         let svg = scene_to_svg(&scene, &self.opts);
@@ -371,21 +377,17 @@ fn expand_tcl_vars(s: &str, pdk_root: &Option<String>, pdk: &Option<String>, sha
 }
 
 // ─── Themes ──────────────────────────────────────────────────────────────────
+//
+// Los temas están en el módulo `theme` como `Theme::dark()` / `Theme::light()`.
+// Estas funciones existen como atajo cuando solo se necesita la paleta plana
+// (p.ej. `RenderOptions.colors = dark_theme()`).
 
 pub fn dark_theme() -> Vec<String> {
-    ["#000000","#00ccee","#3f3f3f","#cccccc","#88dd00","#bb2200",
-     "#00ccee","#ff0000","#ffff00","#ffffff","#ff00ff","#00ff00",
-     "#0000cc","#aaaa00","#aaccaa","#ff7777","#bfff81","#00ffcc",
-     "#ce0097","#d2d46b","#ef6158","#fdb200"]
-    .iter().map(|s| s.to_string()).collect()
+    crate::theme::Theme::dark().into_vec()
 }
 
 pub fn light_theme() -> Vec<String> {
-    ["#ffffff","#0044ee","#aaaaaa","#222222","#229900","#bb2200",
-     "#00ccee","#ff0000","#888800","#00aaaa","#880088","#00ff00",
-     "#0000cc","#666600","#557755","#aa2222","#7ccc40","#00ffcc",
-     "#ce0097","#d2d46b","#ef6158","#fdb200"]
-    .iter().map(|s| s.to_string()).collect()
+    crate::theme::Theme::light().into_vec()
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

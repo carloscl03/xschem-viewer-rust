@@ -16,9 +16,9 @@ mod tests;
 #[grammar = "parser/xschem.pest"]
 struct XschemParser;
 
-pub fn parse(input: &str) -> Result<Schematic, String> {
+pub fn parse(input: &str) -> crate::error::Result<Schematic> {
     let parsed = XschemParser::parse(Rule::schematic, input)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| crate::error::XschemError::Parse(e.to_string()))?
         .next()
         .unwrap();
 

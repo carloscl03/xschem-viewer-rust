@@ -32,4 +32,7 @@ svg = "0.17"
 # Home directory detection (for xschemrc lookup)
 dirs = "6.0"
 
+# Error handling
+thiserror = "2.0"
+
 [dev-dependencies]
