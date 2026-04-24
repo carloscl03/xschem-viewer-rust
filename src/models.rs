@@ -118,6 +118,54 @@ pub struct ResolvedScene {
     pub pin_positions: HashMap<String, Vec<(String, f64, f64)>>,
 }
 
+impl ResolvedScene {
+    /// Itera los elementos pertenecientes a un componente concreto.
+    pub fn elements_of<'a>(&'a self, component_id: &'a str) -> impl Iterator<Item = &'a DrawElement> {
+        self.elements
+            .iter()
+            .filter(move |e| e.component_id() == Some(component_id))
+    }
+
+    /// Bounding box de todos los primitivos que pertenecen a un componente,
+    /// o `None` si no hay elementos con ese `component_id`.
+    ///
+    /// Útil para backends que quieran resaltar o anotar un componente
+    /// específico (por ejemplo: destacar un componente modificado en un
+    /// diff, mostrar un tooltip al hover, etc.).
+    pub fn component_bbox(&self, component_id: &str) -> Option<BoundingBox> {
+        let mut bbox = BoundingBox::default();
+        for elem in self.elements_of(component_id) {
+            match elem {
+                DrawElement::Line { x1, y1, x2, y2, .. } => {
+                    bbox.expand(*x1, *y1);
+                    bbox.expand(*x2, *y2);
+                }
+                DrawElement::Rect { x, y, w, h, .. } => {
+                    bbox.expand(*x, *y);
+                    bbox.expand(x + w, y + h);
+                }
+                DrawElement::Circle { cx, cy, r, .. } => {
+                    bbox.expand(cx - r, cy - r);
+                    bbox.expand(cx + r, cy + r);
+                }
+                DrawElement::Arc { cx, cy, r, .. } => {
+                    bbox.expand(cx - r, cy - r);
+                    bbox.expand(cx + r, cy + r);
+                }
+                DrawElement::Polygon { points, .. } => {
+                    for (x, y) in points {
+                        bbox.expand(*x, *y);
+                    }
+                }
+                DrawElement::Text { x, y, .. } | DrawElement::MissingSymbol { x, y, .. } => {
+                    bbox.expand(*x, *y);
+                }
+            }
+        }
+        if bbox.is_empty() { None } else { Some(bbox) }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BoundingBox {
     pub min_x: f64,

@@ -131,20 +131,33 @@ fn render_element(elem: &DrawElement, buf: &mut String, opts: &RenderOptions) {
         DrawElement::Text { x, y, content, v_size, rotation, mirror, h_center, v_center, layer, .. } => {
             let fill = color(opts, *layer as usize);
             let font_size = v_size * FONT_SCALE;
-            let v_mirror = *rotation == 1 || *rotation == 2;
-            let h_mirror = if *mirror == 1 { !v_mirror } else { v_mirror };
-            let text_anchor = if *h_center { "middle" } else if h_mirror { "end" } else { "start" };
-            let baseline = if *v_center { "middle" } else if v_mirror { "after-edge" } else { "before-edge" };
+            let layout = crate::text_layout::resolve_text_layout(*rotation, *mirror, *h_center, *v_center);
+            let text_anchor = match layout.h_align {
+                crate::text_layout::HAlign::Start  => "start",
+                crate::text_layout::HAlign::Middle => "middle",
+                crate::text_layout::HAlign::End    => "end",
+            };
+            let baseline = match layout.baseline {
+                crate::text_layout::VBaseline::Top    => "before-edge",
+                crate::text_layout::VBaseline::Middle => "middle",
+                crate::text_layout::VBaseline::Bottom => "after-edge",
+            };
             let lines: Vec<&str> = content.lines().collect();
             for (i, line) in lines.iter().enumerate() {
-                let line_index = if v_mirror { lines.len() - 1 - i } else { i } as f64;
+                let line_index = match layout.line_direction {
+                    crate::text_layout::LineDirection::Forward => i,
+                    crate::text_layout::LineDirection::Reverse => lines.len() - 1 - i,
+                } as f64;
                 let dy = line_index * v_size * FONT_SCALE;
+                // SVG mantiene la cadena completa de transforms (rotate + scale)
+                // para preservar el comportamiento exacto del original, aunque
+                // text_layout ya exprese el resultado visual.
                 let mut transforms = vec![format!("translate({x},{y})")];
                 if *rotation != 0 { transforms.push(format!("rotate({})", rotation * 90)); }
                 if *mirror == 1 { transforms.push("scale(-1,1)".to_owned()); }
                 transforms.push(format!("translate(0,{dy})"));
-                if v_mirror { transforms.push("scale(1,-1)".to_owned()); }
-                if h_mirror { transforms.push("scale(-1,1)".to_owned()); }
+                if layout.v_mirror { transforms.push("scale(1,-1)".to_owned()); }
+                if layout.h_mirror { transforms.push("scale(-1,1)".to_owned()); }
                 let transform = transforms.join(" ");
                 let escaped = escape_xml(line);
                 let _ = write!(buf,

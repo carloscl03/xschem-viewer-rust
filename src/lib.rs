@@ -4,6 +4,7 @@ pub mod parser;
 pub mod renderer;
 pub mod scene;
 pub mod semantic;
+pub mod text_layout;
 
 pub use models::{BoundingBox, DrawElement, ResolvedScene, Schematic};
 pub use netlist::{extract_netlist, fill_connectivity, Instance, Net, Netlist, Pin};
@@ -14,6 +15,7 @@ pub use semantic::{
     ChangeKind, ComponentDiff, DiffReport,
     SemanticComponent, SemanticSchematic, SemanticWire,
 };
+pub use text_layout::{resolve_text_layout, HAlign, LineDirection, TextLayout, VBaseline};
 
 /// One-shot: parse + render a SVG en una sola llamada.
 /// Para múltiples archivos del mismo PDK, usa `Renderer::new()` para compartir el caché de símbolos.
