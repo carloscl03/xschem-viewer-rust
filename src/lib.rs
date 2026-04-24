@@ -3,11 +3,17 @@ pub mod netlist;
 pub mod parser;
 pub mod renderer;
 pub mod scene;
+pub mod semantic;
 
 pub use models::{BoundingBox, DrawElement, ResolvedScene, Schematic};
 pub use netlist::{extract_netlist, fill_connectivity, Instance, Net, Netlist, Pin};
 pub use renderer::{dark_theme, light_theme, Renderer, RenderOptions, RenderResult};
 pub use scene::SceneBuilder;
+pub use semantic::{
+    diff, is_xschem, parse_semantic,
+    ChangeKind, ComponentDiff, DiffReport,
+    SemanticComponent, SemanticSchematic, SemanticWire,
+};
 
 /// One-shot: parse + render a SVG en una sola llamada.
 /// Para múltiples archivos del mismo PDK, usa `Renderer::new()` para compartir el caché de símbolos.
