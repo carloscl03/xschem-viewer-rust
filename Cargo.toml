@@ -36,7 +36,11 @@ thiserror = "2.0"
 # que implementa el trait `viewer_core::ViewerBackend` y conversiones
 # entre sus tipos internos y los neutros. Sin la feature, el crate sigue
 # siendo autocontenido y no arrastra dependencias async.
-viewer-core = { path = "../riku_chip/viewer-core", optional = true }
+# Path relativo asumiendo que xschem-viewer-rust vive como submodule en
+# riku_chip/external/. Para uso standalone con esta feature activa, se
+# requiere tener `viewer-core` accesible dos niveles arriba (típicamente
+# clonando riku_chip y usando este crate como submodule de ese workspace).
+viewer-core = { path = "../../viewer-core", optional = true }
 async-trait = { version = "0.1", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 
