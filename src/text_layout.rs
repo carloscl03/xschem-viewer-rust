@@ -126,11 +126,12 @@ pub fn resolve_text_layout(
     //   rotation = 0: horizontal normal.
     //   rotation = 1: vertical, base a la derecha (lee hacia arriba)  → -90°.
     //   rotation = 2: horizontal con anchors invertidos               →   0°.
-    //   rotation = 3: vertical, base a la izquierda (lee hacia abajo) → +90°.
+    //   rotation = 3: vertical como la 1 (lee hacia arriba, como Xschem,
+    //                 que nunca deja texto de arriba hacia abajo) con los
+    //                 anchors del otro lado                            → -90°.
     let visual_angle_deg = match rotation.rem_euclid(4) {
         0 | 2 => 0.0,
-        1 => -90.0,
-        3 => 90.0,
+        1 | 3 => -90.0,
         _ => 0.0,
     };
 
@@ -191,7 +192,8 @@ mod tests {
         let l = resolve_text_layout(3, 0, false, false);
         assert!(!l.v_mirror);
         assert!(!l.h_mirror);
-        assert_eq!(l.visual_angle_deg, 90.0);
+        // Como Xschem: se lee de abajo hacia arriba, igual que la rotación 1.
+        assert_eq!(l.visual_angle_deg, -90.0);
         assert_eq!(l.line_direction, LineDirection::Forward);
     }
 
