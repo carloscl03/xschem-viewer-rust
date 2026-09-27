@@ -185,6 +185,16 @@ fn parse_embedded(pair: Pair<Rule>) -> Vec<Object> {
     objects
 }
 
+/// Propiedades escritas como texto (`name=C1 model=cap W=1`), como el
+/// `template` de un símbolo. Vacío si no se pueden leer.
+pub fn parse_property_string(text: &str) -> Properties {
+    XschemParser::parse(Rule::properties, &format!("{{{text}}}"))
+        .ok()
+        .and_then(|mut pairs| pairs.next())
+        .map(parse_properties)
+        .unwrap_or_default()
+}
+
 fn parse_properties(pair: Pair<Rule>) -> Properties {
     let mut map = BTreeMap::new();
     for p in pair.into_inner() {

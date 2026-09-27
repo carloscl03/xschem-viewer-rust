@@ -5,6 +5,7 @@ pub mod parser;
 pub mod renderer;
 pub mod scene;
 pub mod semantic;
+pub mod tcleval;
 pub mod text_layout;
 pub mod theme;
 pub mod viewport;

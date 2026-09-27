@@ -24,22 +24,34 @@ impl Transform {
         Self::default()
     }
 
+    /// Como Xschem (macro `ROTATION`): primero el espejo en X, después la
+    /// rotación. En el otro orden, un símbolo rotado 90°/270° y espejado
+    /// queda reflejado del lado contrario (y sus pines, cambiados de lado).
     fn apply(&self, x: f64, y: f64) -> (f64, f64) {
-        let (rx, ry) = rotate(x, y, self.rotation);
-        let fx = if self.flip { -rx } else { rx };
-        (fx + self.tx, ry + self.ty)
+        let fx = if self.flip { -x } else { x };
+        let (rx, ry) = rotate(fx, y, self.rotation);
+        (rx + self.tx, ry + self.ty)
     }
 
+    /// Transformación de un símbolo dentro de otro: `P(R_c(F_c(q)) + t_c)`.
+    /// Un espejo del padre invierte el sentido de la rotación del hijo
+    /// (`F·R(θ) = R(−θ)·F`), así que en ese caso las rotaciones se restan.
     fn child(&self, tx: f64, ty: f64, rotation: i32, flip: bool) -> Self {
-        let combined_rotation = (self.rotation + rotation) % 4;
-        let combined_flip = if flip { !self.flip } else { self.flip };
+        let combined_rotation = if self.flip { self.rotation - rotation } else { self.rotation + rotation }.rem_euclid(4);
+        let combined_flip = self.flip != flip;
         let (ox, oy) = self.apply(tx, ty);
         Self { tx: ox, ty: oy, rotation: combined_rotation, flip: combined_flip }
     }
 
-    fn rotation_deg(&self) -> f64 {
-        self.rotation as f64 * 90.0
+    /// Ángulo de inicio de un arco transformado (grados, sentido matemático
+    /// con el eje Y hacia abajo, como Xschem). El espejo refleja el tramo
+    /// `[s, s+w]` a `[180−s−w, 180−s]`; cada paso de rotación resta 90°
+    /// (Xschem: `270·rot + 180 − b − a` con espejo, `a + 270·rot` sin él).
+    fn arc_start(&self, start: f64, sweep: f64) -> f64 {
+        let s = if self.flip { 180.0 - start - sweep } else { start };
+        (s - 90.0 * self.rotation as f64).rem_euclid(360.0)
     }
+
 }
 
 fn rotate(x: f64, y: f64, steps: i32) -> (f64, f64) {
@@ -171,7 +183,7 @@ impl<'a> SceneBuilder<'a> {
                 } else {
                     self.elements.push(DrawElement::Arc {
                         cx, cy, r: a.radius,
-                        start_angle: a.start_angle + gt.rotation_deg(),
+                        start_angle: gt.arc_start(a.start_angle, a.sweep_angle),
                         sweep_angle: a.sweep_angle,
                         layer: a.layer,
                         component_id: component_id.map(str::to_owned),
@@ -204,8 +216,11 @@ impl<'a> SceneBuilder<'a> {
                 }
                 let (x, y) = gt.apply(t.x, t.y);
                 self.bbox.expand(x, y);
-                let content = substitute_attrs(&t.text, parent_props);
-                let combined_rotation = (t.rotation + gt.rotation) % 4;
+                let content = crate::tcleval::eval_text(&substitute_attrs(&t.text, parent_props));
+                // Como Xschem (`draw_symbol`): con espejo, un texto de rotación
+                // impar gira 180° más para seguir legible del mismo lado.
+                let extra = if gt.flip && t.rotation % 2 == 1 { 2 } else { 0 };
+                let combined_rotation = (t.rotation + gt.rotation + extra).rem_euclid(4);
                 let layer = t.properties.get("layer")
                     .and_then(|s| s.parse::<i32>().ok())
                     .unwrap_or(3);
@@ -273,6 +288,12 @@ impl<'a> SceneBuilder<'a> {
                 match self.resolve_symbol(&sym_file) {
                     Some(objects) => {
                         let objects = Arc::clone(&objects);
+                        // Como Xschem: un atributo que la instancia no define
+                        // toma el valor del `template` del símbolo (`@mult`,
+                        // `@MF`…), así los textos calculados no quedan vacíos.
+                        for (k, v) in template_defaults(&objects) {
+                            comp_props.entry(k).or_insert(v);
+                        }
                         self.visit_objects(&objects, child_gt, &comp_props, Some(&cid));
                     }
                     None => {
@@ -334,6 +355,18 @@ impl<'a> SceneBuilder<'a> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Valores por defecto del símbolo (`template=` de su bloque `K`).
+fn template_defaults(objects: &[Object]) -> Properties {
+    objects
+        .iter()
+        .find_map(|o| match o {
+            Object::GlobalProperties(p) => p.get("template"),
+            _ => None,
+        })
+        .map(|t| parser::parse_property_string(t))
+        .unwrap_or_default()
+}
+
 fn substitute_attrs(text: &str, props: &Properties) -> String {
     let mut result = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -369,4 +402,78 @@ pub fn arc_endpoints(cx: f64, cy: f64, r: f64, start_deg: f64, sweep_deg: f64)
     let y2 = cy + r * ((start + sweep) * PI / 180.0).sin();
     let large_arc = sweep.abs() > 180.0;
     ((x1, y1), (x2, y2), large_arc)
+}
+
+#[cfg(test)]
+mod orientation_tests {
+    use super::*;
+    use crate::models::DrawElement;
+
+    /// Símbolo tipo capacitor: pin `c0` arriba y un arco bajo la placa, con
+    /// un texto que usa un atributo que solo está en el `template`.
+    const SYM: &str = "v {xschem version=3.1.0 file_version=1.2}
+K {type=capacitor template=\"name=C1 MF=2\"}
+L 4 -10 -5 10 -5 {}
+B 5 -2.5 -32.5 2.5 -27.5 {name=c0 dir=inout}
+A 4 0 23.75 21.25 61.92751306414704 56.14497387170592 {}
+T {MF=@MF} 17.5 18.75 0 0 0.2 0.2 {}
+";
+
+    fn scene(rot: i32, flip: i32) -> ResolvedScene {
+        let dir = std::env::temp_dir().join(format!("xv-orient-{}-{rot}-{flip}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cap.sym"), SYM).unwrap();
+        let sch = format!("v {{xschem version=3.1.0 file_version=1.2}}\nC {{cap.sym}} 0 0 {rot} {flip} {{name=C1}}\n");
+        let opts = RenderOptions::dark().with_sym_path(&dir);
+        let s = SceneBuilder::new(&opts).build(&parser::parse(&sch).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        s
+    }
+
+    fn arc_endpoints_of(s: &ResolvedScene) -> ((f64, f64), (f64, f64)) {
+        s.elements
+            .iter()
+            .find_map(|e| match e {
+                DrawElement::Arc { cx, cy, r, start_angle, sweep_angle, .. } => {
+                    let (a, b, _) = arc_endpoints(*cx, *cy, *r, *start_angle, *sweep_angle);
+                    Some((a, b))
+                }
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn near(a: (f64, f64), b: (f64, f64)) -> bool {
+        (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+    }
+
+    #[test]
+    fn rotated_arc_stays_next_to_the_plate() {
+        // Como Xschem: rotar 90° lleva (10, 5) y (−10, 5) a (−5, 10) y (−5, −10).
+        let (a, b) = arc_endpoints_of(&scene(1, 0));
+        assert!(near(a, (-5.0, 10.0)) && near(b, (-5.0, -10.0)) || near(a, (-5.0, -10.0)) && near(b, (-5.0, 10.0)), "{a:?} {b:?}");
+        let (a, b) = arc_endpoints_of(&scene(3, 1));
+        assert!((a.0 - 5.0).abs() < 1e-6 && (b.0 - 5.0).abs() < 1e-6, "{a:?} {b:?}");
+    }
+
+    #[test]
+    fn flip_is_applied_before_rotation() {
+        // Pin c0 (0, −30) en r1 con espejo: Xschem lo deja a la derecha (30, 0).
+        let s = scene(1, 1);
+        let pin = s
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                DrawElement::Rect { x, y, w, h, layer: 5, .. } => Some((x + w / 2.0, y + h / 2.0)),
+                _ => None,
+            })
+            .unwrap();
+        assert!(near(pin, (30.0, 0.0)), "{pin:?}");
+    }
+
+    #[test]
+    fn missing_attributes_come_from_the_template() {
+        let s = scene(0, 0);
+        assert!(s.elements.iter().any(|e| matches!(e, DrawElement::Text { content, .. } if content == "MF=2")));
+    }
 }
