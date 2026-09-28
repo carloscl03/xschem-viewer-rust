@@ -206,6 +206,7 @@ impl ViewerBackend for XschemBackend {
             let local_opts = RenderOptions {
                 colors: opts.colors.clone(),
                 symbol_paths: opts.symbol_paths.clone(),
+                symbol_lookup: opts.symbol_lookup.clone(),
             };
             let renderer = Renderer::new(local_opts);
             let resolved = renderer

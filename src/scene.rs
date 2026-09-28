@@ -330,6 +330,14 @@ impl<'a> SceneBuilder<'a> {
             return Some(Arc::clone(cached));
         }
 
+        if let Some(content) = self.opts.symbol_lookup.as_ref().and_then(|lookup| lookup(sym_file)) {
+            if let Ok(sch) = parser::parse(&content) {
+                let arc = Arc::new(sch.objects);
+                self.sym_cache.insert(sym_file.to_string(), Arc::clone(&arc));
+                return Some(arc);
+            }
+        }
+
         let filename = sym_file.split('/').last().unwrap_or(sym_file);
         let no_slash = !sym_file.contains('/');
 
@@ -475,5 +483,22 @@ T {MF=@MF} 17.5 18.75 0 0 0.2 0.2 {}
     fn missing_attributes_come_from_the_template() {
         let s = scene(0, 0);
         assert!(s.elements.iter().any(|e| matches!(e, DrawElement::Text { content, .. } if content == "MF=2")));
+    }
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+    use crate::renderer::RenderOptions;
+
+    #[test]
+    fn symbol_lookup_se_consulta_antes_que_el_disco() {
+        let sym = "v {xschem version=3.4.5 file_version=1.2}\nL 4 0 0 10 0 {}\n";
+        let lookup: crate::renderer::SymbolLookup = Arc::new(move |s: &str| (s == "mio.sym").then(|| sym.to_string()));
+        let opts = RenderOptions::dark().with_symbol_lookup(lookup);
+        let sch = parser::parse("v {xschem version=3.4.5 file_version=1.2}\nC {mio.sym} 0 0 0 0 {name=x1}\n").unwrap();
+        let rs = SceneBuilder::new(&opts).build(&sch);
+        assert!(rs.missing_symbols.is_empty(), "{:?}", rs.missing_symbols);
+        assert!(rs.elements_of("x1").next().is_some());
     }
 }

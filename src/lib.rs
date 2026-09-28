@@ -45,6 +45,7 @@ pub fn resolve_scene(content: &str, opts: &RenderOptions) -> Result<ResolvedScen
     Renderer::new(RenderOptions {
         colors: opts.colors.clone(),
         symbol_paths: opts.symbol_paths.clone(),
+        symbol_lookup: opts.symbol_lookup.clone(),
     })
     .resolve(content)
 }

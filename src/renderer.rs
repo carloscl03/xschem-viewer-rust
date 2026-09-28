@@ -10,28 +10,41 @@ const JUNCTION_RADIUS: f64 = 3.0;
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
+/// Contenido de un símbolo por su referencia (`amp.sym`, `lib/amp.sym`), de
+/// donde el llamador quiera (un commit de Git, memoria). `None` = no lo
+/// tiene: se sigue buscando en `symbol_paths`.
+pub type SymbolLookup = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 pub struct RenderOptions {
     pub colors: Vec<String>,
     pub symbol_paths: Vec<std::path::PathBuf>,
+    /// Se consulta antes que `symbol_paths` (ver [`SymbolLookup`]).
+    pub symbol_lookup: Option<SymbolLookup>,
 }
 
 impl RenderOptions {
     pub fn dark() -> Self {
-        Self { colors: crate::theme::Theme::dark().into_vec(), symbol_paths: vec![] }
+        Self { colors: crate::theme::Theme::dark().into_vec(), symbol_paths: vec![], symbol_lookup: None }
     }
 
     pub fn light() -> Self {
-        Self { colors: crate::theme::Theme::light().into_vec(), symbol_paths: vec![] }
+        Self { colors: crate::theme::Theme::light().into_vec(), symbol_paths: vec![], symbol_lookup: None }
     }
 
     /// Construye opciones desde un `Theme` estructurado.
     /// Preferido sobre `dark()/light()` cuando se quiere una paleta custom.
     pub fn with_theme(theme: crate::theme::Theme) -> Self {
-        Self { colors: theme.into_vec(), symbol_paths: vec![] }
+        Self { colors: theme.into_vec(), symbol_paths: vec![], symbol_lookup: None }
     }
 
     pub fn with_sym_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.symbol_paths.push(path.into());
+        self
+    }
+
+    /// Símbolos de otra fuente antes que del disco (ver [`SymbolLookup`]).
+    pub fn with_symbol_lookup(mut self, lookup: SymbolLookup) -> Self {
+        self.symbol_lookup = Some(lookup);
         self
     }
 
