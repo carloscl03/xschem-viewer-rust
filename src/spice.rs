@@ -48,15 +48,15 @@ pub struct Spice {
 /// La netlist de `text` (el esquemático `path`, de nombre `name`).
 pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: SpiceOptions, lookup: SchematicLookup<'_>) -> Result<Spice, String> {
     let mut n = Netlister { builder: SceneBuilder::new(opts), spice, lookup, defined: BTreeMap::new(), warnings: Vec::new() };
-    let top = n.cell(text, path)?;
+    let top = n.cell(text, path, true)?;
     let mut out = String::new();
     out.push_str(&format!("** {name}\n"));
     if spice.top_subckt {
         // Los pines, los del símbolo del esquemático (`amp.sch` → `amp.sym`)
         // si tiene uno, en su orden; si no, sus `ipin`/`opin`/`iopin`.
         let stem = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".sch");
-        let ports = match n.builder.resolve_symbol(&format!("{stem}.sym")).map(|o| symbol_of(&o, spice.lvs).pins) {
-            Some(pins) if !pins.is_empty() => pins.into_iter().map(|p| p.name).collect(),
+        let ports = match n.builder.resolve_symbol(&format!("{stem}.sym")).map(|o| symbol_of(&o, spice.lvs).ports()) {
+            Some(ports) if !ports.is_empty() => ports,
             _ => top.ports,
         };
         out.push_str(&format!(".subckt {name} {}\n", ports.join(" ")));
@@ -88,6 +88,15 @@ struct Symbol {
     template: Properties,
     props: Properties,
     pins: Vec<SymPin>,
+}
+
+impl Symbol {
+    /// Los puertos de su `.subckt`: sus pines y los de `extra` (p. ej.
+    /// `extra="VCCPIN VSSPIN"`, la alimentación que no se dibuja).
+    fn ports(&self) -> Vec<String> {
+        let extra = self.props.get("extra").map(|e| e.split_whitespace().map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+        self.pins.iter().map(|p| p.name.clone()).chain(extra).collect()
+    }
 }
 
 fn symbol_of(objects: &[Object], lvs: bool) -> Symbol {
@@ -155,7 +164,9 @@ struct Inst {
 }
 
 impl<'a> Netlister<'a> {
-    fn cell(&mut self, text: &str, path: &str) -> Result<Cell, String> {
+    /// `top`: el esquemático de arriba (los bloques de código con
+    /// `only_toplevel=true` solo se escriben ahí).
+    fn cell(&mut self, text: &str, path: &str, top: bool) -> Result<Cell, String> {
         let sch = parser::parse(text).map_err(|e| format!("{path}: {e}"))?;
 
         // Nodos: cada wire y cada pin de instancia.
@@ -289,11 +300,22 @@ impl<'a> Netlister<'a> {
         let ports: Vec<String> = labels.iter().filter(|(_, _, r)| *r != "label").map(|(n, _, _)| name(&mut uf, *n)).collect();
 
         let mut body = String::new();
+        let mut commands: Vec<String> = Vec::new();
         for inst in &insts {
             let skip = |key: &str| {
                 [inst.attrs.get(key), inst.symbol.props.get(key)].into_iter().flatten().any(|v| matches!(v.trim(), "true" | "open" | "short"))
             };
-            if skip("spice_ignore") || (self.spice.lvs && skip("lvs_ignore")) || inst.symbol.kind == "netlist_commands" || inst.symbol.kind == "launcher" {
+            if skip("spice_ignore") || (self.spice.lvs && skip("lvs_ignore")) || inst.symbol.kind == "launcher" {
+                continue;
+            }
+            // Bloques de código: Xschem los escribe (también en modo LVS)
+            // después de los dispositivos.
+            if inst.symbol.kind == "netlist_commands" {
+                let only_top = inst.attrs.get("only_toplevel").is_some_and(|v| v.trim() == "true");
+                if top || !only_top {
+                    let format = inst.symbol.format.clone().unwrap_or_else(|| "@value".to_string());
+                    commands.push(expand(&format, &inst.name, &inst.symname, &inst.attrs, &[]));
+                }
                 continue;
             }
             let Some(format) = inst.symbol.format.clone() else { continue };
@@ -306,14 +328,21 @@ impl<'a> Netlister<'a> {
                 body.push('\n');
             }
             if let Some(reference) = &inst.schematic {
-                self.define(&inst.symname, reference, path, &inst.symbol.pins);
+                self.define(&inst.symname, reference, path, &inst.symbol.ports());
+            }
+        }
+        for c in commands {
+            let c = c.trim();
+            if !c.is_empty() {
+                body.push_str(c);
+                body.push('\n');
             }
         }
         Ok(Cell { ports, body })
     }
 
     /// Escribe el `.subckt` de un símbolo, una vez, con su esquemático.
-    fn define(&mut self, symname: &str, reference: &str, from: &str, pins: &[SymPin]) {
+    fn define(&mut self, symname: &str, reference: &str, from: &str, ports: &[String]) {
         if self.defined.contains_key(symname) {
             return;
         }
@@ -322,9 +351,8 @@ impl<'a> Netlister<'a> {
             self.warnings.push(format!("{from}: no se encontró el esquemático de {symname} ({reference})"));
             return;
         };
-        match self.cell(&text, &path) {
+        match self.cell(&text, &path, false) {
             Ok(cell) => {
-                let ports: Vec<&str> = pins.iter().map(|p| p.name.as_str()).collect();
                 let def = format!(".subckt {symname} {}\n{}.ends\n", ports.join(" "), cell.body);
                 self.defined.insert(symname.to_string(), Some(def));
             }
