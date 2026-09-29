@@ -119,7 +119,8 @@ impl Symbol {
         let mut out: Vec<(String, String)> = Vec::new();
         for tok in format.split_whitespace() {
             let Some((k, v)) = tok.split_once('=') else { continue };
-            if v.strip_prefix('@') != Some(k) || k == "name" || self.pins.iter().any(|p| p.name == k) || out.iter().any(|(o, _)| o == k) {
+            // `m` es la multiplicidad: Xschem no la declara.
+            if v.strip_prefix('@') != Some(k) || k == "name" || k == "m" || self.pins.iter().any(|p| p.name == k) || out.iter().any(|(o, _)| o == k) {
                 continue;
             }
             out.push((k.to_string(), self.template.get(k).cloned().unwrap_or_default()));
@@ -379,8 +380,11 @@ impl<'a> Netlister<'a> {
                 self.define(&inst.symname, reference, path, &inst.symbol);
             }
         }
+        // El código SPICE del propio esquemático (`S {…}`, "user
+        // architecture code"), después de los bloques de código.
+        commands.extend(sch.objects.iter().filter_map(|o| if let Object::Spice(t) = o { Some(t.clone()) } else { None }));
         for c in commands {
-            let c = c.trim();
+            let c = c.trim_matches('\n').trim_end();
             if !c.is_empty() {
                 body.push_str(c);
                 body.push('\n');
@@ -401,7 +405,9 @@ impl<'a> Netlister<'a> {
             return;
         };
         let params = symbol.params();
-        let defaults: Properties = params.iter().cloned().collect();
+        // Los `@x` de adentro: del template del símbolo (y sus parámetros).
+        let mut defaults = symbol.template.clone();
+        defaults.extend(params.iter().cloned());
         match self.cell(&text, &path, false, &defaults) {
             Ok(cell) => {
                 let head = symbol.ports(&cell.nets).into_iter().chain(params.iter().map(|(k, v)| format!("{k}={v}"))).collect::<Vec<_>>().join(" ");
@@ -427,8 +433,11 @@ fn expand(format: &str, name: &str, symname: &str, attrs: &Properties, params: &
     };
     while i < chars.len() {
         let c = chars[i];
+        // `\x` es `x`; `\\` (un separador, como en `__\\@symname`) no deja nada.
         if c == '\\' && i + 1 < chars.len() {
-            out.push(chars[i + 1]);
+            if chars[i + 1] != '\\' {
+                out.push(chars[i + 1]);
+            }
             i += 2;
             continue;
         }
@@ -489,8 +498,15 @@ fn expand(format: &str, name: &str, symname: &str, attrs: &Properties, params: &
         }
         i = end;
     }
-    // Espacios de más donde se quitaron tokens.
-    let out: String = out.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join("\n");
+    // Espacios de más donde se quitaron tokens (la sangría queda).
+    let out: String = out
+        .lines()
+        .map(|l| {
+            let indent = &l[..l.len() - l.trim_start().len()];
+            format!("{indent}{}", l.split_whitespace().collect::<Vec<_>>().join(" "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     if out.contains("tcleval(") {
         crate::tcleval::eval_text_with(&out, vars)
     } else {
