@@ -17,7 +17,7 @@
 //! No se escriben las etiquetas, los textos de comandos (`netlist_commands`)
 //! ni lo que lleva `spice_ignore` (o `lvs_ignore`, en modo LVS).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::models::{Object, Properties};
@@ -56,14 +56,14 @@ pub struct Spice {
 pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: SpiceOptions, lookup: SchematicLookup<'_>) -> Result<Spice, String> {
     let (lvs, top_subckt) = (spice.lvs, spice.top_subckt);
     let mut n = Netlister { builder: SceneBuilder::new(opts), spice, lookup, defined: BTreeMap::new(), globals: Vec::new(), warnings: Vec::new() };
-    let top = n.cell(text, path, true)?;
+    let top = n.cell(text, path, true, &Properties::new())?;
     let mut out = String::new();
     out.push_str(&format!("** {name}\n"));
     if top_subckt {
         // Los pines, los del símbolo del esquemático (`amp.sch` → `amp.sym`)
         // si tiene uno, en su orden; si no, sus `ipin`/`opin`/`iopin`.
         let stem = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".sch");
-        let ports = match n.builder.resolve_symbol(&format!("{stem}.sym")).map(|o| symbol_of(&o, lvs).ports()) {
+        let ports = match n.builder.resolve_symbol(&format!("{stem}.sym")).map(|o| symbol_of(&o, lvs).ports(&top.nets)) {
             Some(ports) if !ports.is_empty() => ports,
             _ => top.ports,
         };
@@ -104,11 +104,27 @@ struct Symbol {
 }
 
 impl Symbol {
-    /// Los puertos de su `.subckt`: sus pines y los de `extra` (p. ej.
-    /// `extra="VCCPIN VSSPIN"`, la alimentación que no se dibuja).
-    fn ports(&self) -> Vec<String> {
-        let extra = self.props.get("extra").map(|e| e.split_whitespace().map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+    /// Los puertos de su `.subckt`: sus pines y los de `extra` que son nets
+    /// de su esquemático (`extra="VCCPIN VSSPIN"`, la alimentación que no se
+    /// dibuja; los demás de `extra` son parámetros).
+    fn ports(&self, nets: &HashSet<String>) -> Vec<String> {
+        let extra = self.props.get("extra").map(|e| e.split_whitespace().filter(|x| nets.contains(*x)).map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
         self.pins.iter().map(|p| p.name.clone()).chain(extra).collect()
+    }
+
+    /// Sus parámetros: los `clave=@clave` de su `format` (sin los pines),
+    /// con el valor de su `template`.
+    fn params(&self) -> Vec<(String, String)> {
+        let format = self.format.as_deref().unwrap_or("");
+        let mut out: Vec<(String, String)> = Vec::new();
+        for tok in format.split_whitespace() {
+            let Some((k, v)) = tok.split_once('=') else { continue };
+            if v.strip_prefix('@') != Some(k) || k == "name" || self.pins.iter().any(|p| p.name == k) || out.iter().any(|(o, _)| o == k) {
+                continue;
+            }
+            out.push((k.to_string(), self.template.get(k).cloned().unwrap_or_default()));
+        }
+        out
     }
 }
 
@@ -150,6 +166,8 @@ fn symbol_of(objects: &[Object], lvs: bool) -> Symbol {
 struct Cell {
     /// Las nets de sus pines (`ipin`/`opin`/`iopin`), en orden.
     ports: Vec<String>,
+    /// Los nombres de todas sus nets.
+    nets: HashSet<String>,
     /// Una línea (o varias, con `+`) por instancia.
     body: String,
 }
@@ -180,8 +198,9 @@ struct Inst {
 
 impl<'a> Netlister<'a> {
     /// `top`: el esquemático de arriba (los bloques de código con
-    /// `only_toplevel=true` solo se escriben ahí).
-    fn cell(&mut self, text: &str, path: &str, top: bool) -> Result<Cell, String> {
+    /// `only_toplevel=true` solo se escriben ahí). `params`: los del símbolo
+    /// que se está definiendo, para los valores `@x` de sus instancias.
+    fn cell(&mut self, text: &str, path: &str, top: bool, params: &Properties) -> Result<Cell, String> {
         let sch = parser::parse(text).map_err(|e| format!("{path}: {e}"))?;
 
         // Nodos: cada wire y cada pin de instancia.
@@ -343,21 +362,21 @@ impl<'a> Netlister<'a> {
                 let only_top = inst.attrs.get("only_toplevel").is_some_and(|v| v.trim() == "true");
                 if top || !only_top {
                     let format = inst.symbol.format.clone().unwrap_or_else(|| "@value".to_string());
-                    commands.push(expand(&format, &inst.name, &inst.symname, &inst.attrs, &[], &vars));
+                    commands.push(expand(&format, &inst.name, &inst.symname, &inst.attrs, params, &[], &vars));
                 }
                 continue;
             }
             let Some(format) = inst.symbol.format.clone() else { continue };
             let pins: Vec<(String, String)> =
                 inst.symbol.pins.iter().zip(&inst.pin_nodes).map(|(p, &node)| (p.name.clone(), name(&mut uf, node))).collect();
-            let line = expand(&format, &inst.name, &inst.symname, &inst.attrs, &pins, &vars);
+            let line = expand(&format, &inst.name, &inst.symname, &inst.attrs, params, &pins, &vars);
             let line = line.trim();
             if !line.is_empty() {
                 body.push_str(line);
                 body.push('\n');
             }
             if let Some(reference) = &inst.schematic {
-                self.define(&inst.symname, reference, path, &inst.symbol.ports());
+                self.define(&inst.symname, reference, path, &inst.symbol);
             }
         }
         for c in commands {
@@ -367,11 +386,12 @@ impl<'a> Netlister<'a> {
                 body.push('\n');
             }
         }
-        Ok(Cell { ports, body })
+        let nets = net_name.values().cloned().collect();
+        Ok(Cell { ports, nets, body })
     }
 
     /// Escribe el `.subckt` de un símbolo, una vez, con su esquemático.
-    fn define(&mut self, symname: &str, reference: &str, from: &str, ports: &[String]) {
+    fn define(&mut self, symname: &str, reference: &str, from: &str, symbol: &Symbol) {
         if self.defined.contains_key(symname) {
             return;
         }
@@ -380,9 +400,12 @@ impl<'a> Netlister<'a> {
             self.warnings.push(format!("{from}: no se encontró el esquemático de {symname} ({reference})"));
             return;
         };
-        match self.cell(&text, &path, false) {
+        let params = symbol.params();
+        let defaults: Properties = params.iter().cloned().collect();
+        match self.cell(&text, &path, false, &defaults) {
             Ok(cell) => {
-                let def = format!("{}\n{}.ends\n", format!(".subckt {symname} {}", ports.join(" ")).trim_end(), cell.body);
+                let head = symbol.ports(&cell.nets).into_iter().chain(params.iter().map(|(k, v)| format!("{k}={v}"))).collect::<Vec<_>>().join(" ");
+                let def = format!("{}\n{}.ends\n", format!(".subckt {symname} {head}").trim_end(), cell.body);
                 self.defined.insert(symname.to_string(), Some(def));
             }
             Err(e) => self.warnings.push(e),
@@ -391,7 +414,7 @@ impl<'a> Netlister<'a> {
 }
 
 /// El `format` de un símbolo con los datos de una instancia.
-fn expand(format: &str, name: &str, symname: &str, attrs: &Properties, pins: &[(String, String)], vars: crate::tcleval::Vars<'_>) -> String {
+fn expand(format: &str, name: &str, symname: &str, attrs: &Properties, params: &Properties, pins: &[(String, String)], vars: crate::tcleval::Vars<'_>) -> String {
     let chars: Vec<char> = format.chars().collect();
     let mut out = String::with_capacity(format.len() + 32);
     let mut i = 0;
@@ -439,7 +462,12 @@ fn expand(format: &str, name: &str, symname: &str, attrs: &Properties, pins: &[(
                 }
             }
             _ => {
-                let value = attrs.get(&key).map(|v| v.trim()).unwrap_or("");
+                // `model=@modeln`: el parámetro del símbolo que se define
+                // (vacío arriba de todo).
+                let value = match attrs.get(&key).map(|v| v.trim()).unwrap_or("") {
+                    v if v.starts_with('@') && v[1..].chars().all(|c| c.is_alphanumeric() || c == '_') => params.get(&v[1..]).map(String::as_str).unwrap_or(""),
+                    v => v,
+                };
                 // `clave=@attr` sin valor no se escribe; `m=1` tampoco (es
                 // el valor por omisión), como en Xschem.
                 let token = out.rfind(char::is_whitespace).map_or(0, |p| p + 1);
@@ -588,13 +616,13 @@ C {amp.sym} 0 200 0 0 {name=x2}\n";
     fn expande_pines_y_atributos() {
         let attrs: Properties = [("spiceprefix", "X"), ("W", "2"), ("model", "nfet")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         let pins = vec![("D".to_string(), "out".to_string()), ("G".to_string(), "in".to_string())];
-        assert_eq!(expand("@spiceprefix@name @pinlist sky130_fd_pr__@model W=@W G=@@G", "M1", "nfet", &attrs, &pins, NONE), "XM1 out in sky130_fd_pr__nfet W=2 G=in");
+        assert_eq!(expand("@spiceprefix@name @pinlist sky130_fd_pr__@model W=@W G=@@G", "M1", "nfet", &attrs, &Properties::new(), &pins, NONE), "XM1 out in sky130_fd_pr__nfet W=2 G=in");
     }
 
     #[test]
     fn sin_valor_no_se_escribe_la_clave_ni_m_1() {
         let attrs: Properties = [("W", "2"), ("m", "1"), ("value", "3"), ("savecurrent", "true")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        assert_eq!(expand("@name W=@W nf=@nf m=@m", "M1", "nfet", &attrs, &[], NONE), "M1 W=2");
-        assert_eq!(expand("@name @value@savecurrent", "V1", "vsource", &attrs, &[], NONE), "V1 3\n.save i(v1)");
+        assert_eq!(expand("@name W=@W nf=@nf m=@m", "M1", "nfet", &attrs, &Properties::new(), &[], NONE), "M1 W=2");
+        assert_eq!(expand("@name @value@savecurrent", "V1", "vsource", &attrs, &Properties::new(), &[], NONE), "V1 3\n.save i(v1)");
     }
 }
