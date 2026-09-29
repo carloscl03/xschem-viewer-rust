@@ -11,7 +11,7 @@ use crate::renderer::RenderOptions;
 // ─── Transform ───────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Default)]
-struct Transform {
+pub(crate) struct Transform {
     tx: f64,
     ty: f64,
     /// 0–3 en pasos de 90°
@@ -20,14 +20,14 @@ struct Transform {
 }
 
 impl Transform {
-    fn identity() -> Self {
+    pub(crate) fn identity() -> Self {
         Self::default()
     }
 
     /// Como Xschem (macro `ROTATION`): primero el espejo en X, después la
     /// rotación. En el otro orden, un símbolo rotado 90°/270° y espejado
     /// queda reflejado del lado contrario (y sus pines, cambiados de lado).
-    fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+    pub(crate) fn apply(&self, x: f64, y: f64) -> (f64, f64) {
         let fx = if self.flip { -x } else { x };
         let (rx, ry) = rotate(fx, y, self.rotation);
         (rx + self.tx, ry + self.ty)
@@ -36,7 +36,7 @@ impl Transform {
     /// Transformación de un símbolo dentro de otro: `P(R_c(F_c(q)) + t_c)`.
     /// Un espejo del padre invierte el sentido de la rotación del hijo
     /// (`F·R(θ) = R(−θ)·F`), así que en ese caso las rotaciones se restan.
-    fn child(&self, tx: f64, ty: f64, rotation: i32, flip: bool) -> Self {
+    pub(crate) fn child(&self, tx: f64, ty: f64, rotation: i32, flip: bool) -> Self {
         let combined_rotation = if self.flip { self.rotation - rotation } else { self.rotation + rotation }.rem_euclid(4);
         let combined_flip = self.flip != flip;
         let (ox, oy) = self.apply(tx, ty);
@@ -325,7 +325,7 @@ impl<'a> SceneBuilder<'a> {
         }
     }
 
-    fn resolve_symbol(&mut self, sym_file: &str) -> Option<Arc<Vec<Object>>> {
+    pub(crate) fn resolve_symbol(&mut self, sym_file: &str) -> Option<Arc<Vec<Object>>> {
         if let Some(cached) = self.sym_cache.get(sym_file) {
             return Some(Arc::clone(cached));
         }
@@ -364,7 +364,7 @@ impl<'a> SceneBuilder<'a> {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Valores por defecto del símbolo (`template=` de su bloque `K`).
-fn template_defaults(objects: &[Object]) -> Properties {
+pub(crate) fn template_defaults(objects: &[Object]) -> Properties {
     objects
         .iter()
         .find_map(|o| match o {
