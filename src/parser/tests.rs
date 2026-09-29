@@ -232,3 +232,14 @@ fn schematic_wires_and_components() {
     assert_eq!(sch.wires().count(), 1);
     assert_eq!(sch.components().count(), 1);
 }
+
+#[test]
+fn template_con_comillas_escapadas_y_espacios() {
+    // El template de pfet_03v3 de GF180, ya sin el escape del bloque K.
+    let t = "name=M1\nL=0.28u\nm=1\nad=\\\"'int((nf+1)/2) * W/nf * 0.18u'\\\"\nmodel=pfet_03v3\nspiceprefix=X\n";
+    let p = crate::parser::parse_property_string(t);
+    assert_eq!(p.get("m").map(String::as_str), Some("1"));
+    assert_eq!(p.get("model").map(String::as_str), Some("pfet_03v3"));
+    assert_eq!(p.get("spiceprefix").map(String::as_str), Some("X"));
+    assert_eq!(p.get("ad").map(String::as_str), Some("'int((nf+1)/2) * W/nf * 0.18u'"));
+}

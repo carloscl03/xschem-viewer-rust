@@ -52,8 +52,14 @@ pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: 
     let mut out = String::new();
     out.push_str(&format!("** {name}\n"));
     if spice.top_subckt {
-        // Los pines, en el orden del símbolo del esquemático si tiene uno.
-        out.push_str(&format!(".subckt {name} {}\n", top.ports.join(" ")));
+        // Los pines, los del símbolo del esquemático (`amp.sch` → `amp.sym`)
+        // si tiene uno, en su orden; si no, sus `ipin`/`opin`/`iopin`.
+        let stem = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".sch");
+        let ports = match n.builder.resolve_symbol(&format!("{stem}.sym")).map(|o| symbol_of(&o, spice.lvs).pins) {
+            Some(pins) if !pins.is_empty() => pins.into_iter().map(|p| p.name).collect(),
+            _ => top.ports,
+        };
+        out.push_str(&format!(".subckt {name} {}\n", ports.join(" ")));
         out.push_str(&top.body);
         out.push_str(".ends\n");
     } else {
@@ -369,10 +375,37 @@ fn expand(format: &str, name: &str, symname: &str, attrs: &Properties, pins: &[(
             "symname" => out.push_str(symname),
             "pinlist" => out.push_str(&pins.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(" ")),
             "path" => {}
-            _ => out.push_str(attrs.get(&key).map(String::as_str).unwrap_or("")),
+            // `savecurrent=true`: la corriente se guarda (`.save i(v1)`).
+            "savecurrent" => {
+                if attrs.get("savecurrent").is_some_and(|v| v.trim() == "true") {
+                    out.push_str(&format!("\n.save i({})", name.to_lowercase()));
+                }
+            }
+            _ => {
+                let value = attrs.get(&key).map(|v| v.trim()).unwrap_or("");
+                // `clave=@attr` sin valor no se escribe; `m=1` tampoco (es
+                // el valor por omisión), como en Xschem.
+                let token = out.rfind(char::is_whitespace).map_or(0, |p| p + 1);
+                let assign = out[token..].strip_suffix('=').filter(|k| !k.is_empty() && !k.contains('@'));
+                match assign {
+                    Some(k) if value.is_empty() || (k == "m" && value == "1") => {
+                        out.truncate(token);
+                        // Lo que siga pegado al valor (hasta el espacio) tampoco.
+                        let mut j = end;
+                        while j < chars.len() && !chars[j].is_whitespace() {
+                            j += 1;
+                        }
+                        i = j;
+                        continue;
+                    }
+                    _ => out.push_str(value),
+                }
+            }
         }
         i = end;
     }
+    // Espacios de más donde se quitaron tokens.
+    let out: String = out.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join("\n");
     if out.contains("tcleval(") {
         crate::tcleval::eval_text(&out)
     } else {
@@ -457,8 +490,8 @@ N 0 30 100 -30 {}\n\
 C {ipin.sym} 0 -30 0 0 {name=p1 lab=in}\n";
         let s = netlist(sch, "t.sch", "t", &opts(), SpiceOptions { lvs: true, top_subckt: true }, &|_, _| None).unwrap();
         assert!(s.text.contains(".subckt t in\n"), "{}", s.text);
-        assert!(s.text.contains("R1 in net1 1k m=1\n"), "{}", s.text);
-        assert!(s.text.contains("R2 net1 net2 2k m=1\n"), "{}", s.text);
+        assert!(s.text.contains("R1 in net1 1k\n"), "{}", s.text);
+        assert!(s.text.contains("R2 net1 net2 2k\n"), "{}", s.text);
         assert!(s.warnings.is_empty(), "{:?}", s.warnings);
     }
 
@@ -471,7 +504,7 @@ C {res.sym} 0 0 0 0 {name=R1 value=1k}\n\
 N 0 -30 0 -60 {lab=#net1}\n\
 N 0 30 0 60 {lab=#net1}\n";
         let s = netlist(sch, "t.sch", "t", &opts(), SpiceOptions::default(), &|_, _| None).unwrap();
-        assert!(s.text.contains("R1 net1 net2 1k m=1\n"), "{}", s.text);
+        assert!(s.text.contains("R1 net1 net2 1k\n"), "{}", s.text);
     }
 
     #[test]
@@ -487,7 +520,7 @@ C {amp.sym} 0 200 0 0 {name=x2}\n";
         let s = netlist(top, "top.sch", "top", &opts(), SpiceOptions::default(), &lookup).unwrap();
         assert_eq!(s.text.matches(".subckt amp in out").count(), 1, "{}", s.text);
         assert!(s.text.contains("x1 net1 net2 amp"), "{}", s.text);
-        assert!(s.text.contains("R1 in out 5k m=1"), "{}", s.text);
+        assert!(s.text.contains("R1 in out 5k"), "{}", s.text);
     }
 
     #[test]
@@ -495,5 +528,12 @@ C {amp.sym} 0 200 0 0 {name=x2}\n";
         let attrs: Properties = [("spiceprefix", "X"), ("W", "2"), ("model", "nfet")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         let pins = vec![("D".to_string(), "out".to_string()), ("G".to_string(), "in".to_string())];
         assert_eq!(expand("@spiceprefix@name @pinlist sky130_fd_pr__@model W=@W G=@@G", "M1", "nfet", &attrs, &pins), "XM1 out in sky130_fd_pr__nfet W=2 G=in");
+    }
+
+    #[test]
+    fn sin_valor_no_se_escribe_la_clave_ni_m_1() {
+        let attrs: Properties = [("W", "2"), ("m", "1"), ("value", "3"), ("savecurrent", "true")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        assert_eq!(expand("@name W=@W nf=@nf m=@m", "M1", "nfet", &attrs, &[]), "M1 W=2");
+        assert_eq!(expand("@name @value@savecurrent", "V1", "vsource", &attrs, &[]), "V1 3\n.save i(v1)");
     }
 }

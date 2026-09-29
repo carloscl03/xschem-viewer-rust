@@ -186,13 +186,58 @@ fn parse_embedded(pair: Pair<Rule>) -> Vec<Object> {
 }
 
 /// Propiedades escritas como texto (`name=C1 model=cap W=1`), como el
-/// `template` de un símbolo. Vacío si no se pueden leer.
+/// `template` de un símbolo. Si la gramática no puede con el texto (p. ej.
+/// `ad=\"'int((nf+1)/2) * W'\"` en los templates de GF180), las lee token a
+/// token, como Xschem.
 pub fn parse_property_string(text: &str) -> Properties {
     XschemParser::parse(Rule::properties, &format!("{{{text}}}"))
         .ok()
         .and_then(|mut pairs| pairs.next())
         .map(parse_properties)
-        .unwrap_or_default()
+        .unwrap_or_else(|| parse_tokens(text))
+}
+
+/// `clave=valor` separados por espacios; el valor va entre comillas (`"` o
+/// `\"`) si tiene espacios, y `\x` es `x`.
+fn parse_tokens(text: &str) -> Properties {
+    let chars: Vec<char> = text.chars().collect();
+    let mut map = BTreeMap::new();
+    let mut i = 0;
+    while i < chars.len() {
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        let start = i;
+        while i < chars.len() && chars[i] != '=' && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        let key: String = chars[start..i].iter().collect();
+        if i >= chars.len() || chars[i] != '=' {
+            continue;
+        }
+        i += 1;
+        let (mut value, mut quoted) = (String::new(), false);
+        while i < chars.len() && (quoted || !chars[i].is_whitespace()) {
+            match (chars[i], chars.get(i + 1)) {
+                ('\\', Some('"')) | ('"', _) => {
+                    quoted = !quoted;
+                    i += if chars[i] == '\\' { 2 } else { 1 };
+                }
+                ('\\', Some(&c)) => {
+                    value.push(c);
+                    i += 2;
+                }
+                (c, _) => {
+                    value.push(c);
+                    i += 1;
+                }
+            }
+        }
+        if !key.is_empty() {
+            map.insert(key, value);
+        }
+    }
+    map
 }
 
 fn parse_properties(pair: Pair<Rule>) -> Properties {
