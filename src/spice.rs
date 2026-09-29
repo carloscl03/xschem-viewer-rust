@@ -198,7 +198,12 @@ impl<'a> Netlister<'a> {
                 self.warnings.push(format!("{path}: no se encontró el símbolo {sym_file}"));
                 continue;
             };
-            let symbol = symbol_of(&objects, self.spice.lvs);
+            let mut symbol = symbol_of(&objects, self.spice.lvs);
+            // El `format` (o `lvs_format`) de la instancia manda sobre el del símbolo.
+            let own = if self.spice.lvs { c.properties.get("lvs_format").or(c.properties.get("format")) } else { c.properties.get("format") };
+            if let Some(f) = own {
+                symbol.format = Some(f.clone());
+            }
             let mut attrs = symbol.template.clone();
             for (k, v) in &c.properties {
                 attrs.insert(k.clone(), v.clone());
