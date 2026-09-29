@@ -18,6 +18,7 @@
 //! ni lo que lleva `spice_ignore` (o `lvs_ignore`, en modo LVS).
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use crate::models::{Object, Properties};
 use crate::parser;
@@ -25,13 +26,19 @@ use crate::renderer::RenderOptions;
 use crate::scene::{template_defaults, SceneBuilder, Transform};
 
 /// Cómo escribir la netlist.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct SpiceOptions {
     /// Modo LVS: `lvs_format` si el símbolo lo tiene y `lvs_ignore`.
     pub lvs: bool,
     /// El esquemático de arriba también como `.subckt` (con sus pines).
     pub top_subckt: bool,
+    /// Las variables de Tcl de los `tcleval(…)` (p. ej. las del `xschemrc`
+    /// del PDK, [`crate::tcleval::rc_vars`]).
+    pub vars: Option<TclVars>,
 }
+
+/// El valor de una variable de Tcl.
+pub type TclVars = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// El texto de un sub-esquemático: `(referencia, esquemático que la usa)` →
 /// `(ruta, contenido)`. La referencia es la del atributo `schematic=` o la
@@ -47,15 +54,16 @@ pub struct Spice {
 
 /// La netlist de `text` (el esquemático `path`, de nombre `name`).
 pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: SpiceOptions, lookup: SchematicLookup<'_>) -> Result<Spice, String> {
+    let (lvs, top_subckt) = (spice.lvs, spice.top_subckt);
     let mut n = Netlister { builder: SceneBuilder::new(opts), spice, lookup, defined: BTreeMap::new(), globals: Vec::new(), warnings: Vec::new() };
     let top = n.cell(text, path, true)?;
     let mut out = String::new();
     out.push_str(&format!("** {name}\n"));
-    if spice.top_subckt {
+    if top_subckt {
         // Los pines, los del símbolo del esquemático (`amp.sch` → `amp.sym`)
         // si tiene uno, en su orden; si no, sus `ipin`/`opin`/`iopin`.
         let stem = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".sch");
-        let ports = match n.builder.resolve_symbol(&format!("{stem}.sym")).map(|o| symbol_of(&o, spice.lvs).ports()) {
+        let ports = match n.builder.resolve_symbol(&format!("{stem}.sym")).map(|o| symbol_of(&o, lvs).ports()) {
             Some(ports) if !ports.is_empty() => ports,
             _ => top.ports,
         };
@@ -313,6 +321,8 @@ impl<'a> Netlister<'a> {
 
         let ports: Vec<String> = labels.iter().filter(|(_, _, r)| *r != "label").map(|(n, _, _)| name(&mut uf, *n)).collect();
 
+        let tcl = self.spice.vars.clone();
+        let vars = move |n: &str| tcl.as_ref().and_then(|v| v(n));
         let mut body = String::new();
         let mut commands: Vec<String> = Vec::new();
         for inst in &insts {
@@ -328,14 +338,14 @@ impl<'a> Netlister<'a> {
                 let only_top = inst.attrs.get("only_toplevel").is_some_and(|v| v.trim() == "true");
                 if top || !only_top {
                     let format = inst.symbol.format.clone().unwrap_or_else(|| "@value".to_string());
-                    commands.push(expand(&format, &inst.name, &inst.symname, &inst.attrs, &[]));
+                    commands.push(expand(&format, &inst.name, &inst.symname, &inst.attrs, &[], &vars));
                 }
                 continue;
             }
             let Some(format) = inst.symbol.format.clone() else { continue };
             let pins: Vec<(String, String)> =
                 inst.symbol.pins.iter().zip(&inst.pin_nodes).map(|(p, &node)| (p.name.clone(), name(&mut uf, node))).collect();
-            let line = expand(&format, &inst.name, &inst.symname, &inst.attrs, &pins);
+            let line = expand(&format, &inst.name, &inst.symname, &inst.attrs, &pins, &vars);
             let line = line.trim();
             if !line.is_empty() {
                 body.push_str(line);
@@ -376,7 +386,7 @@ impl<'a> Netlister<'a> {
 }
 
 /// El `format` de un símbolo con los datos de una instancia.
-fn expand(format: &str, name: &str, symname: &str, attrs: &Properties, pins: &[(String, String)]) -> String {
+fn expand(format: &str, name: &str, symname: &str, attrs: &Properties, pins: &[(String, String)], vars: crate::tcleval::Vars<'_>) -> String {
     let chars: Vec<char> = format.chars().collect();
     let mut out = String::with_capacity(format.len() + 32);
     let mut i = 0;
@@ -449,7 +459,7 @@ fn expand(format: &str, name: &str, symname: &str, attrs: &Properties, pins: &[(
     // Espacios de más donde se quitaron tokens.
     let out: String = out.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join("\n");
     if out.contains("tcleval(") {
-        crate::tcleval::eval_text(&out)
+        crate::tcleval::eval_text_with(&out, vars)
     } else {
         out
     }
@@ -510,7 +520,11 @@ impl UnionFind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+
+    fn none(_: &str) -> Option<String> {
+        None
+    }
+    const NONE: crate::tcleval::Vars<'static> = &none;
 
     const RES: &str = "v {xschem version=3.4.5 file_version=1.2}\nK {type=resistor\nformat=\"@name @pinlist @value m=@m\"\ntemplate=\"name=R1 value=1k m=1\"}\nB 5 -2.5 -32.5 2.5 -27.5 {name=P dir=inout}\nB 5 -2.5 27.5 2.5 32.5 {name=M dir=inout}\n";
     const PIN: &str = "v {xschem version=3.4.5 file_version=1.2}\nK {type=ipin\nformat=\"*.ipin @lab\"\ntemplate=\"name=p1 lab=xxx\"}\nB 5 -2.5 -2.5 2.5 2.5 {name=p dir=in}\n";
@@ -530,7 +544,7 @@ C {res.sym} 0 0 0 0 {name=R1 value=1k}\n\
 C {res.sym} 100 0 0 0 {name=R2 value=2k}\n\
 N 0 30 100 -30 {}\n\
 C {ipin.sym} 0 -30 0 0 {name=p1 lab=in}\n";
-        let s = netlist(sch, "t.sch", "t", &opts(), SpiceOptions { lvs: true, top_subckt: true }, &|_, _| None).unwrap();
+        let s = netlist(sch, "t.sch", "t", &opts(), SpiceOptions { lvs: true, top_subckt: true, ..Default::default() }, &|_, _| None).unwrap();
         assert!(s.text.contains(".subckt t in\n"), "{}", s.text);
         assert!(s.text.contains("R1 in net1 1k\n"), "{}", s.text);
         assert!(s.text.contains("R2 net1 net2 2k\n"), "{}", s.text);
@@ -569,13 +583,13 @@ C {amp.sym} 0 200 0 0 {name=x2}\n";
     fn expande_pines_y_atributos() {
         let attrs: Properties = [("spiceprefix", "X"), ("W", "2"), ("model", "nfet")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         let pins = vec![("D".to_string(), "out".to_string()), ("G".to_string(), "in".to_string())];
-        assert_eq!(expand("@spiceprefix@name @pinlist sky130_fd_pr__@model W=@W G=@@G", "M1", "nfet", &attrs, &pins), "XM1 out in sky130_fd_pr__nfet W=2 G=in");
+        assert_eq!(expand("@spiceprefix@name @pinlist sky130_fd_pr__@model W=@W G=@@G", "M1", "nfet", &attrs, &pins, NONE), "XM1 out in sky130_fd_pr__nfet W=2 G=in");
     }
 
     #[test]
     fn sin_valor_no_se_escribe_la_clave_ni_m_1() {
         let attrs: Properties = [("W", "2"), ("m", "1"), ("value", "3"), ("savecurrent", "true")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        assert_eq!(expand("@name W=@W nf=@nf m=@m", "M1", "nfet", &attrs, &[]), "M1 W=2");
-        assert_eq!(expand("@name @value@savecurrent", "V1", "vsource", &attrs, &[]), "V1 3\n.save i(v1)");
+        assert_eq!(expand("@name W=@W nf=@nf m=@m", "M1", "nfet", &attrs, &[], NONE), "M1 W=2");
+        assert_eq!(expand("@name @value@savecurrent", "V1", "vsource", &attrs, &[], NONE), "V1 3\n.save i(v1)");
     }
 }

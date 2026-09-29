@@ -7,9 +7,10 @@
 //!
 //! Busca los símbolos en la carpeta del esquemático, en las que se le pasan,
 //! en `$PDK_ROOT/$PDK/libs.tech/xschem` y en las del `xschemrc` de la carpeta
-//! actual.
+//! actual. Las variables de los `tcleval(…)` salen del `xschemrc` del PDK.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use xschem_viewer::renderer::RenderOptions;
 use xschem_viewer::spice::{netlist, SpiceOptions};
@@ -33,10 +34,16 @@ fn main() {
         std::process::exit(2);
     });
 
+    let pdk = std::env::var("PDK_ROOT").ok().zip(std::env::var("PDK").ok()).map(|(r, p)| Path::new(&r).join(p));
+    let rc = pdk.as_ref().and_then(|p| std::fs::read_to_string(p.join("libs.tech/xschem/xschemrc")).ok()).unwrap_or_default();
+    let env = |n: &str| std::env::var(n.trim_start_matches("env(").trim_end_matches(')')).ok();
+    let vars = xschem_viewer::tcleval::rc_vars(&rc, &env);
+    spice.vars = Some(Arc::new(move |n: &str| vars.get(n).cloned().or_else(|| env(n))));
+
     let mut dirs: Vec<PathBuf> = vec![sch.parent().unwrap_or(Path::new(".")).to_path_buf()];
     dirs.extend(rest[1..].iter().map(PathBuf::from));
-    if let (Ok(root), Ok(pdk)) = (std::env::var("PDK_ROOT"), std::env::var("PDK")) {
-        dirs.push(Path::new(&root).join(pdk).join("libs.tech/xschem"));
+    if let Some(pdk) = &pdk {
+        dirs.push(pdk.join("libs.tech/xschem"));
     }
     let opts = dirs.iter().fold(RenderOptions::dark().with_sym_paths_from_xschemrc(), |o, d| o.with_sym_path(d.clone()));
 

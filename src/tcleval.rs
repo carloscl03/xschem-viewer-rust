@@ -10,11 +10,23 @@
 //!
 //! No hay un intérprete de Tcl: se resuelven las sustituciones `[...]` de
 //! los comandos que usan los símbolos (`ev`, `expr`, `to_eng`) con
-//! aritmética simple. Lo que no se puede evaluar queda como `?`, para no
-//! mostrar código Tcl en el lienzo.
+//! aritmética simple, y las variables (`$::180MCU_MODELS`) si se sabe su
+//! valor. Lo que no se puede evaluar queda como `?`, para no mostrar código
+//! Tcl en el lienzo.
+
+use std::collections::HashMap;
+
+/// El valor de una variable de Tcl (`SKYWATER_MODELS`, `env(PDK_ROOT)`).
+pub type Vars<'a> = &'a dyn Fn(&str) -> Option<String>;
 
 /// Resuelve cada `tcleval(...)` del texto; el resto queda igual.
 pub fn eval_text(text: &str) -> String {
+    eval_text_with(text, &|_| None)
+}
+
+/// Como [`eval_text`], con las variables de `vars` (y `$env(X)` del
+/// entorno).
+pub fn eval_text_with(text: &str, vars: Vars<'_>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(i) = rest.find("tcleval(") {
@@ -22,7 +34,7 @@ pub fn eval_text(text: &str) -> String {
         let body_start = i + "tcleval(".len();
         match matching(&rest[body_start..], '(', ')') {
             Some(len) => {
-                out.push_str(&substitute(&rest[body_start..body_start + len]));
+                out.push_str(&substitute(&variables(&rest[body_start..body_start + len], vars)));
                 rest = &rest[body_start + len + 1..];
             }
             None => {
@@ -33,6 +45,84 @@ pub fn eval_text(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Sustitución de variables: `$::X`, `$X`, `${X}`, `$env(X)`. Las que no
+/// se conocen quedan como están.
+pub fn variables(s: &str, vars: Vars<'_>) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '$' || (i > 0 && chars[i - 1] == '\\') {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        if chars[j..].starts_with(&[':', ':']) {
+            j += 2;
+        }
+        let (name, end) = if chars.get(j) == Some(&'{') {
+            match chars[j + 1..].iter().position(|&c| c == '}') {
+                Some(k) => (chars[j + 1..j + 1 + k].iter().collect::<String>(), j + 2 + k),
+                None => (String::new(), j),
+            }
+        } else {
+            let mut k = j;
+            while k < chars.len() && (chars[k].is_alphanumeric() || chars[k] == '_') {
+                k += 1;
+            }
+            let mut name: String = chars[j..k].iter().collect();
+            if name == "env" && chars.get(k) == Some(&'(') {
+                if let Some(p) = chars[k + 1..].iter().position(|&c| c == ')') {
+                    name = format!("env({})", chars[k + 1..k + 1 + p].iter().collect::<String>());
+                    k += 2 + p;
+                }
+            }
+            (name, k)
+        };
+        let value = (!name.is_empty()).then(|| vars(&name)).flatten().or_else(|| {
+            let var = name.strip_prefix("env(")?.strip_suffix(')')?;
+            std::env::var(var).ok()
+        });
+        match value {
+            Some(v) => {
+                out.push_str(&v);
+                i = end;
+            }
+            None => {
+                out.push('$');
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Las variables que fija un `xschemrc` con `set NOMBRE valor`, con las
+/// anteriores y las de `env` ya sustituidas. No evalúa los `if`: vale el
+/// último `set` que se pudo resolver entero.
+pub fn rc_vars(rc: &str, env: Vars<'_>) -> HashMap<String, String> {
+    let mut vars: HashMap<String, String> = HashMap::new();
+    for line in rc.lines() {
+        let Some(rest) = line.trim().strip_prefix("set ") else { continue };
+        let Some((name, value)) = rest.trim().split_once(char::is_whitespace) else { continue };
+        let (name, value) = (name.trim_start_matches("::"), value.trim());
+        // `{…}`: literal; `"…"` o suelto: con sustitución; `[…]`: un comando.
+        let resolved = if let Some(v) = value.strip_prefix('{').and_then(|v| v.strip_suffix('}')) {
+            v.to_string()
+        } else if value.starts_with('[') {
+            continue;
+        } else {
+            let v = value.trim_matches('"');
+            variables(v, &|n| vars.get(n).cloned().or_else(|| env(n)))
+        };
+        if !resolved.contains('$') && !resolved.contains('[') {
+            vars.insert(name.to_string(), resolved);
+        }
+    }
+    vars
 }
 
 /// Largo hasta el cierre que equilibra `open`/`close` (sin incluirlo).
@@ -318,5 +408,19 @@ mod tests {
         // IHP: valores con sufijo SPICE y `ev7`.
         assert_eq!(eval_text("tcleval(A=[ev7 \\{ 1.0u * 2u \\}])"), "A=2e-12");
         assert_eq!(eval_text("tcleval(C=[to_eng [ev \\{(10u * 10u * 1.5e-3)\\}]])"), "C=150f");
+    }
+
+    #[test]
+    fn variables_del_xschemrc() {
+        let rc = "if {1} {\n  set PDK_ROOT $env(PDK_ROOT)\n  set 180MCU_MODELS ${PDK_ROOT}/gf180mcuD/libs.tech/ngspice\n}\nset raro [pwd]\n";
+        let env = |n: &str| (n == "env(PDK_ROOT)").then(|| "/pdks".to_string());
+        let vars = rc_vars(rc, &env);
+        assert_eq!(vars.get("180MCU_MODELS").map(String::as_str), Some("/pdks/gf180mcuD/libs.tech/ngspice"));
+        assert!(!vars.contains_key("raro"));
+        let get = |n: &str| vars.get(n).cloned();
+        assert_eq!(
+            eval_text_with("tcleval(.include $::180MCU_MODELS/design.ngspice $::NADA)", &get),
+            ".include /pdks/gf180mcuD/libs.tech/ngspice/design.ngspice $::NADA"
+        );
     }
 }
