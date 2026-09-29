@@ -47,7 +47,7 @@ pub struct Spice {
 
 /// La netlist de `text` (el esquemático `path`, de nombre `name`).
 pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: SpiceOptions, lookup: SchematicLookup<'_>) -> Result<Spice, String> {
-    let mut n = Netlister { builder: SceneBuilder::new(opts), spice, lookup, defined: BTreeMap::new(), warnings: Vec::new() };
+    let mut n = Netlister { builder: SceneBuilder::new(opts), spice, lookup, defined: BTreeMap::new(), globals: Vec::new(), warnings: Vec::new() };
     let top = n.cell(text, path, true)?;
     let mut out = String::new();
     out.push_str(&format!("** {name}\n"));
@@ -59,7 +59,8 @@ pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: 
             Some(ports) if !ports.is_empty() => ports,
             _ => top.ports,
         };
-        out.push_str(&format!(".subckt {name} {}\n", ports.join(" ")));
+        out.push_str(format!(".subckt {name} {}", ports.join(" ")).trim_end());
+        out.push('\n');
         out.push_str(&top.body);
         out.push_str(".ends\n");
     } else {
@@ -68,6 +69,10 @@ pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: 
     for def in n.defined.values().flatten() {
         out.push('\n');
         out.push_str(def);
+    }
+    // Las nets globales (`vdd.sym`, `gnd.sym`: `global=true`).
+    for g in &n.globals {
+        out.push_str(&format!(".GLOBAL {g}\n"));
     }
     out.push_str(".end\n");
     Ok(Spice { text: out, warnings: n.warnings })
@@ -148,6 +153,8 @@ struct Netlister<'a> {
     /// `.subckt` de cada símbolo ya escrito (`None` mientras se escribe:
     /// corta los ciclos).
     defined: BTreeMap<String, Option<String>>,
+    /// Nets globales, en el orden en que aparecen.
+    globals: Vec<String>,
     warnings: Vec<String>,
 }
 
@@ -200,6 +207,13 @@ impl<'a> Netlister<'a> {
                 .collect();
             match symbol.kind.as_str() {
                 k @ ("label" | "ipin" | "opin" | "iopin") => {
+                    let global = [attrs.get("global"), symbol.props.get("global")].into_iter().flatten().any(|v| v.trim() == "true");
+                    if let (true, Some(lab)) = (global, attrs.get("lab")) {
+                        let lab = lab.trim().to_string();
+                        if !lab.is_empty() && lab != "0" && !self.globals.contains(&lab) {
+                            self.globals.push(lab);
+                        }
+                    }
                     if let (Some(lab), Some(&node)) = (attrs.get("lab"), pin_nodes.first()) {
                         let role = match k {
                             "ipin" => "ipin",
@@ -353,7 +367,7 @@ impl<'a> Netlister<'a> {
         };
         match self.cell(&text, &path, false) {
             Ok(cell) => {
-                let def = format!(".subckt {symname} {}\n{}.ends\n", ports.join(" "), cell.body);
+                let def = format!("{}\n{}.ends\n", format!(".subckt {symname} {}", ports.join(" ")).trim_end(), cell.body);
                 self.defined.insert(symname.to_string(), Some(def));
             }
             Err(e) => self.warnings.push(e),
