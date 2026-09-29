@@ -243,24 +243,39 @@ impl<'a> Netlister<'a> {
         for (node, lab, _) in &labels {
             name_of(&mut uf, *node, lab);
         }
+        // `#net3`: el nombre que Xschem le puso a una net sin nombre la
+        // última vez. Puede estar viejo, así que no une nets: solo se usa
+        // (sin `#`) si nadie más lo tiene.
+        let mut auto: Vec<(usize, String)> = Vec::new();
         for (i, w) in wires.iter().enumerate() {
-            if let Some(lab) = w.properties.get("lab") {
-                name_of(&mut uf, i, lab);
+            match w.properties.get("lab").map(|l| l.trim()) {
+                Some(lab) if lab.starts_with('#') => auto.push((i, lab.trim_start_matches('#').to_string())),
+                Some(lab) => name_of(&mut uf, i, lab),
+                None => {}
             }
         }
         let mut net_name: HashMap<usize, String> = HashMap::new();
         for (name, node) in &named {
             net_name.entry(uf.find(*node)).or_insert_with(|| name.clone());
         }
+        let mut taken: std::collections::HashSet<String> = net_name.values().cloned().collect();
+        for (node, lab) in auto {
+            let root = uf.find(node);
+            if !net_name.contains_key(&root) && !lab.is_empty() && taken.insert(lab.clone()) {
+                net_name.insert(root, lab);
+            }
+        }
         let mut next = 1;
         let mut name = |uf: &mut UnionFind, node: usize| -> String {
             let root = uf.find(node);
             net_name
                 .entry(root)
-                .or_insert_with(|| {
+                .or_insert_with(|| loop {
                     let n = format!("net{next}");
                     next += 1;
-                    n
+                    if taken.insert(n.clone()) {
+                        break n;
+                    }
                 })
                 .clone()
         };
@@ -445,6 +460,18 @@ C {ipin.sym} 0 -30 0 0 {name=p1 lab=in}\n";
         assert!(s.text.contains("R1 in net1 1k m=1\n"), "{}", s.text);
         assert!(s.text.contains("R2 net1 net2 2k m=1\n"), "{}", s.text);
         assert!(s.warnings.is_empty(), "{:?}", s.warnings);
+    }
+
+    #[test]
+    fn los_nombres_de_xschem_con_numeral_no_unen_nets() {
+        // Dos wires sueltos con el mismo `#net1` viejo: siguen separados; el
+        // primero se queda con `net1` y el otro recibe uno nuevo.
+        let sch = "v {xschem version=3.4.5 file_version=1.2}\n\
+C {res.sym} 0 0 0 0 {name=R1 value=1k}\n\
+N 0 -30 0 -60 {lab=#net1}\n\
+N 0 30 0 60 {lab=#net1}\n";
+        let s = netlist(sch, "t.sch", "t", &opts(), SpiceOptions::default(), &|_, _| None).unwrap();
+        assert!(s.text.contains("R1 net1 net2 1k m=1\n"), "{}", s.text);
     }
 
     #[test]
