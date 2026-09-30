@@ -27,7 +27,7 @@ use crate::scene::{template_defaults, SceneBuilder, Transform};
 
 /// Cambia cuando cambia la netlist que se escribe (para las cachés de
 /// resultados, como la del historial del LVS de Riku).
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 /// Cómo escribir la netlist.
 #[derive(Clone, Default)]
@@ -466,11 +466,14 @@ impl<'a> Netlister<'a> {
                 }
             }
             if let Some(reference) = &inst.schematic {
+                // Una variante (`schematic=` en la instancia) es de esa
+                // instancia: sus `@x` toman los valores de la instancia.
                 let fallback = inst.base.as_ref().map(|(_, r)| r.as_str());
-                self.define(&inst.symname, reference, fallback, path, &inst.symbol);
+                let own = inst.base.is_some().then_some(&inst.attrs);
+                self.define(&inst.symname, reference, fallback, own, path, &inst.symbol);
             }
             if let Some((base, reference)) = &inst.base {
-                self.define(base, reference, None, path, &inst.symbol);
+                self.define(base, reference, None, None, path, &inst.symbol);
             }
         }
         // El código SPICE del propio esquemático (`S {…}`, "user
@@ -489,8 +492,9 @@ impl<'a> Netlister<'a> {
     }
 
     /// Escribe el `.subckt` de un símbolo, una vez, con su esquemático.
-    /// `fallback`: el esquemático a usar si `reference` no existe.
-    fn define(&mut self, symname: &str, reference: &str, fallback: Option<&str>, from: &str, symbol: &Symbol) {
+    /// `fallback`: el esquemático a usar si `reference` no existe. `own`:
+    /// los atributos de la instancia, si la definición es solo suya.
+    fn define(&mut self, symname: &str, reference: &str, fallback: Option<&str>, own: Option<&Properties>, from: &str, symbol: &Symbol) {
         if self.defined.contains_key(symname) {
             return;
         }
@@ -504,6 +508,9 @@ impl<'a> Netlister<'a> {
         // Los `@x` de adentro: del template del símbolo (y sus parámetros).
         let mut defaults = symbol.template.clone();
         defaults.extend(params.iter().cloned());
+        if let Some(own) = own {
+            defaults.extend(own.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
         match self.cell(&text, &path, false, &defaults) {
             Ok(cell) => {
                 let head = symbol.ports(&cell.nets).into_iter().chain(params.iter().map(|(k, v)| format!("{k}={v}"))).collect::<Vec<_>>().join(" ");
