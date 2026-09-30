@@ -27,7 +27,7 @@ use crate::scene::{template_defaults, SceneBuilder, Transform};
 
 /// Cambia cuando cambia la netlist que se escribe (para las cachés de
 /// resultados, como la del historial del LVS de Riku).
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Cómo escribir la netlist.
 #[derive(Clone, Default)]
@@ -67,9 +67,13 @@ pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: 
         // Los pines, los del símbolo del esquemático (`amp.sch` → `amp.sym`)
         // si tiene uno, en su orden; si no, sus `ipin`/`opin`/`iopin`.
         let stem = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".sch");
-        let ports = match n.builder.resolve_symbol(&format!("{stem}.sym")).map(|o| symbol_of(&o, lvs).ports(&top.nets)) {
-            Some(ports) if !ports.is_empty() => ports,
-            _ => top.ports,
+        // Con los pines del símbolo si son los mismos que los del
+        // esquemático (en su orden, más los de `extra`); si no, los del
+        // esquemático, como Xschem.
+        let own: HashSet<&String> = top.ports.iter().collect();
+        let ports = match n.builder.resolve_symbol(&format!("{stem}.sym")).map(|o| symbol_of(&o, lvs)) {
+            Some(sym) if !sym.pins.is_empty() && sym.pins.iter().flat_map(|p| bus_bits(&p.name)).collect::<Vec<_>>().iter().collect::<HashSet<_>>() == own => sym.ports(&top.nets),
+            _ => top.ports.clone(),
         };
         out.push_str(format!(".subckt {name} {}", ports.join(" ")).trim_end());
         out.push('\n');
@@ -251,7 +255,8 @@ impl<'a> Netlister<'a> {
                 .collect();
             match symbol.kind.as_str() {
                 k @ ("label" | "ipin" | "opin" | "iopin") => {
-                    let global = [attrs.get("global"), symbol.props.get("global")].into_iter().flatten().any(|v| v.trim() == "true");
+                    // `global=true` (o `global=ground`, como en IHP): todo menos falso.
+                    let global = [attrs.get("global"), symbol.props.get("global")].into_iter().flatten().any(|v| !matches!(v.trim(), "" | "false" | "0"));
                     if let (true, Some(lab)) = (global, attrs.get("lab")) {
                         let lab = lab.trim().to_string();
                         if !lab.is_empty() && lab != "0" && !self.globals.contains(&lab) {
@@ -273,6 +278,15 @@ impl<'a> Netlister<'a> {
             }
             let schematic = (symbol.kind == "subcircuit")
                 .then(|| attrs.get("schematic").or(symbol.props.get("schematic")).cloned().unwrap_or_else(|| sym_file.replace(".sym", ".sch")));
+            // `schematic=passgate_1` en la instancia: otro esquemático para
+            // este símbolo, y el `.subckt` lleva su nombre.
+            let (symname, schematic) = match c.properties.get("schematic").map(|s| s.trim()).filter(|s| !s.is_empty() && symbol.kind == "subcircuit") {
+                Some(own) => {
+                    let file = if own.ends_with(".sch") { own.to_string() } else { format!("{own}.sch") };
+                    (file.rsplit('/').next().unwrap_or(&file).trim_end_matches(".sch").to_string(), Some(file))
+                }
+                None => (symname, schematic),
+            };
             insts.push(Inst { name: attrs.get("name").cloned().unwrap_or_default(), symname, symbol, attrs, pin_nodes, schematic });
         }
 
