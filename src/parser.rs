@@ -234,7 +234,8 @@ fn parse_tokens(text: &str) -> Properties {
             }
         }
         if !key.is_empty() {
-            map.insert(key, value);
+            // Clave repetida: vale la primera, como en Xschem.
+            map.entry(key).or_insert(value);
         }
     }
     map
@@ -247,15 +248,11 @@ fn parse_properties(pair: Pair<Rule>) -> Properties {
             let mut kv = p.into_inner();
             if let Some(key_pair) = kv.next() {
                 let key = key_pair.as_str().to_string();
-                let value = kv
-                    .next()
-                    .map(|vp| {
-                        let inner = vp.into_inner().next().unwrap();
-                        unescape(inner.as_str())
-                    })
-                    .unwrap_or_default();
+                let value = kv.next().map(|vp| unescape(vp.as_str())).unwrap_or_default();
                 if !key.is_empty() {
-                    map.insert(key, value);
+                    // Clave repetida (`name=A dir=in name=p1`): vale la
+                    // primera, como en Xschem.
+                    map.entry(key).or_insert(value);
                 }
             }
         }
@@ -263,22 +260,27 @@ fn parse_properties(pair: Pair<Rule>) -> Properties {
     map
 }
 
+/// El valor sin sus comillas (las que no están escapadas) y con `\x` → `x`.
 fn unescape(s: &str) -> String {
-    let s = if s.starts_with('"') && s.ends_with('"') {
-        &s[1..s.len() - 1]
-    } else {
-        s
-    };
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(&next) = chars.peek() {
-                out.push(next);
+        match c {
+            // `\\"` (comillas escapadas un nivel más adentro, como en los
+            // templates de GF180) queda `\"`.
+            '\\' if chars.peek() == Some(&'\\') && chars.clone().nth(1) == Some('"') => {
+                out.push_str("\\\"");
+                chars.next();
                 chars.next();
             }
-        } else {
-            out.push(c);
+            '\\' => {
+                if let Some(&next) = chars.peek() {
+                    out.push(next);
+                    chars.next();
+                }
+            }
+            '"' => {}
+            _ => out.push(c),
         }
     }
     out

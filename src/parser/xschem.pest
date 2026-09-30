@@ -72,7 +72,10 @@ pair = { prop_key ~ ("=" ~ prop_value)? }
 
 prop_key = @{ (!(WHITESPACE | "=" | "}" | ";" | "\\") ~ ANY)+ }
 
-prop_value = { quoted_string | literal_string }
+// Como en Xschem, cada comilla sin escapar alterna dentro/fuera de comillas:
+// un valor puede ser `"set x="$y" z"` (tramos entre comillas y sueltos, sin
+// espacios fuera de comillas entre ellos).
+prop_value = ${ (quoted_string | literal_string)+ }
 
 quoted_string  = @{ "\"" ~ (string_escape | string_char)* ~ "\"" }
 string_escape  = @{ "\\\\" ~ "\"" | "\\" ~ ANY }
@@ -80,7 +83,7 @@ string_char    = @{ (!"\"" ~ !"\\" ~ ANY)+ }
 
 literal_string = @{ (lit_escape | lit_char)+ }
 lit_escape     = @{ "\\" ~ ANY }
-lit_char       = @{ (!(WHITESPACE | "{" | "}") ~ ANY) }
+lit_char       = @{ (!(WHITESPACE | "{" | "}" | "\"") ~ ANY) }
 
 // ─── Primitives ──────────────────────────────────────────────────────────────
 

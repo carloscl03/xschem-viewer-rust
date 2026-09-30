@@ -243,3 +243,17 @@ fn template_con_comillas_escapadas_y_espacios() {
     assert_eq!(p.get("spiceprefix").map(String::as_str), Some("X"));
     assert_eq!(p.get("ad").map(String::as_str), Some("'int((nf+1)/2) * W/nf * 0.18u'"));
 }
+
+#[test]
+fn clave_repetida_vale_la_primera() {
+    let p = crate::parser::parse_property_string("name=instr[31:0] dir=in name=p1");
+    assert_eq!(p.get("name").map(String::as_str), Some("instr[31:0]"));
+}
+
+#[test]
+fn comillas_sin_escapar_dentro_de_un_valor() {
+    // Como `set vgsp="$&points"` en un bloque de código de IHP.
+    let sch = "v {xschem version=3.4.5 file_version=1.2}\nC {code.sym} 0 0 0 0 {name=s1 value=\"\nset x=\"$y\"\nwrdata f.csv \\{$s\\}.vg\n\"}\n";
+    let c = objects(sch).into_iter().find_map(|o| if let Object::Component(c) = o { Some(c) } else { None }).unwrap();
+    assert_eq!(c.properties.get("value").map(String::as_str), Some("\nset x=$y\nwrdata f.csv {$s}.vg\n"));
+}

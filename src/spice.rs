@@ -27,7 +27,7 @@ use crate::scene::{template_defaults, SceneBuilder, Transform};
 
 /// Cambia cuando cambia la netlist que se escribe (para las cachés de
 /// resultados, como la del historial del LVS de Riku).
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Cómo escribir la netlist.
 #[derive(Clone, Default)]
