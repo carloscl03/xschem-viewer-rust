@@ -5,7 +5,9 @@ WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
 
 // ─── Top level ───────────────────────────────────────────────────────────────
 
-schematic = { SOI ~ version? ~ object* ~ EOI }
+// La versión suele ir primero, pero hay archivos (símbolos de IHP) con `G {}`
+// antes: Xschem acepta cualquier orden.
+schematic = { SOI ~ (version | object)* ~ EOI }
 
 version = {
     "v" ~ "{" ~ "xschem" ~ "version=" ~ version_number

@@ -27,7 +27,7 @@ use crate::scene::{template_defaults, SceneBuilder, Transform};
 
 /// Cambia cuando cambia la netlist que se escribe (para las cachés de
 /// resultados, como la del historial del LVS de Riku).
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// Cómo escribir la netlist.
 #[derive(Clone, Default)]
@@ -63,6 +63,7 @@ pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: 
     let top = n.cell(text, path, true, &Properties::new())?;
     let mut out = String::new();
     out.push_str(&format!("** {name}\n"));
+    out.push_str(&top.header);
     if top_subckt {
         // Los pines, los del símbolo del esquemático (`amp.sch` → `amp.sym`)
         // si tiene uno, en su orden; si no, sus `ipin`/`opin`/`iopin`.
@@ -184,6 +185,8 @@ struct Cell {
     ports: Vec<String>,
     /// Los nombres de todas sus nets.
     nets: HashSet<String>,
+    /// Los bloques de código con `place=header`: van antes del `.subckt`.
+    header: String,
     /// Una línea (o varias, con `+`) por instancia.
     body: String,
 }
@@ -210,6 +213,10 @@ struct Inst {
     pin_nodes: Vec<usize>,
     /// Referencia del sub-esquemático, si es un `subcircuit`.
     schematic: Option<String>,
+    /// Con `schematic=` en la instancia: el nombre y el esquemático propios
+    /// del símbolo (el respaldo si el otro no existe; Xschem también lo
+    /// define).
+    base: Option<(String, String)>,
 }
 
 impl<'a> Netlister<'a> {
@@ -280,14 +287,15 @@ impl<'a> Netlister<'a> {
                 .then(|| attrs.get("schematic").or(symbol.props.get("schematic")).cloned().unwrap_or_else(|| sym_file.replace(".sym", ".sch")));
             // `schematic=passgate_1` en la instancia: otro esquemático para
             // este símbolo, y el `.subckt` lleva su nombre.
-            let (symname, schematic) = match c.properties.get("schematic").map(|s| s.trim()).filter(|s| !s.is_empty() && symbol.kind == "subcircuit") {
+            let (symname, schematic, base) = match c.properties.get("schematic").map(|s| s.trim()).filter(|s| !s.is_empty() && symbol.kind == "subcircuit") {
                 Some(own) => {
                     let file = if own.ends_with(".sch") { own.to_string() } else { format!("{own}.sch") };
-                    (file.rsplit('/').next().unwrap_or(&file).trim_end_matches(".sch").to_string(), Some(file))
+                    let base = schematic.map(|r| (symname.clone(), r));
+                    (file.rsplit('/').next().unwrap_or(&file).trim_end_matches(".sch").to_string(), Some(file), base)
                 }
-                None => (symname, schematic),
+                None => (symname, schematic, None),
             };
-            insts.push(Inst { name: attrs.get("name").cloned().unwrap_or_default(), symname, symbol, attrs, pin_nodes, schematic });
+            insts.push(Inst { name: attrs.get("name").cloned().unwrap_or_default(), symname, symbol, attrs, pin_nodes, schematic, base });
         }
 
         // Wires: extremos compartidos o sobre otro wire.
@@ -380,6 +388,7 @@ impl<'a> Netlister<'a> {
         let vars = move |n: &str| tcl.as_ref().and_then(|v| v(n));
         let mut body = String::new();
         let mut commands: Vec<String> = Vec::new();
+        let mut header: Vec<String> = Vec::new();
         for inst in &insts {
             let skip = |key: &str| {
                 [inst.attrs.get(key), inst.symbol.props.get(key)].into_iter().flatten().any(|v| matches!(v.trim(), "true" | "open" | "short"))
@@ -393,7 +402,11 @@ impl<'a> Netlister<'a> {
                 let only_top = inst.attrs.get("only_toplevel").is_some_and(|v| v.trim() == "true");
                 if top || !only_top {
                     let format = inst.symbol.format.clone().unwrap_or_else(|| "@value".to_string());
-                    commands.push(expand(&format, &inst.name, &inst.symname, &inst.attrs, params, &[], &vars));
+                    let text = expand(&format, &inst.name, &inst.symname, &inst.attrs, params, &[], &vars);
+                    match inst.attrs.get("place").map(|p| p.trim()) {
+                        Some("header") => header.push(text),
+                        _ => commands.push(text),
+                    }
                 }
                 continue;
             }
@@ -415,7 +428,11 @@ impl<'a> Netlister<'a> {
                 }
             }
             if let Some(reference) = &inst.schematic {
-                self.define(&inst.symname, reference, path, &inst.symbol);
+                let fallback = inst.base.as_ref().map(|(_, r)| r.as_str());
+                self.define(&inst.symname, reference, fallback, path, &inst.symbol);
+            }
+            if let Some((base, reference)) = &inst.base {
+                self.define(base, reference, None, path, &inst.symbol);
             }
         }
         // El código SPICE del propio esquemático (`S {…}`, "user
@@ -429,16 +446,19 @@ impl<'a> Netlister<'a> {
             }
         }
         let nets = net_name.values().flat_map(|n| bus_bits(n)).collect();
-        Ok(Cell { ports, nets, body })
+        let header = header.iter().map(|h| h.trim_matches('\n').trim_end()).filter(|h| !h.is_empty()).map(|h| format!("{h}\n")).collect();
+        Ok(Cell { ports, nets, header, body })
     }
 
     /// Escribe el `.subckt` de un símbolo, una vez, con su esquemático.
-    fn define(&mut self, symname: &str, reference: &str, from: &str, symbol: &Symbol) {
+    /// `fallback`: el esquemático a usar si `reference` no existe.
+    fn define(&mut self, symname: &str, reference: &str, fallback: Option<&str>, from: &str, symbol: &Symbol) {
         if self.defined.contains_key(symname) {
             return;
         }
         self.defined.insert(symname.to_string(), None);
-        let Some((path, text)) = (self.lookup)(reference, from) else {
+        let found = (self.lookup)(reference, from).or_else(|| fallback.and_then(|f| (self.lookup)(f, from)));
+        let Some((path, text)) = found else {
             self.warnings.push(format!("{from}: no se encontró el esquemático de {symname} ({reference})"));
             return;
         };
@@ -449,7 +469,7 @@ impl<'a> Netlister<'a> {
         match self.cell(&text, &path, false, &defaults) {
             Ok(cell) => {
                 let head = symbol.ports(&cell.nets).into_iter().chain(params.iter().map(|(k, v)| format!("{k}={v}"))).collect::<Vec<_>>().join(" ");
-                let def = format!("{}\n{}.ends\n", format!(".subckt {symname} {head}").trim_end(), cell.body);
+                let def = format!("{}{}\n{}.ends\n", cell.header, format!(".subckt {symname} {head}").trim_end(), cell.body);
                 self.defined.insert(symname.to_string(), Some(def));
             }
             Err(e) => self.warnings.push(e),
