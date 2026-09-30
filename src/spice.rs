@@ -25,6 +25,10 @@ use crate::parser;
 use crate::renderer::RenderOptions;
 use crate::scene::{template_defaults, SceneBuilder, Transform};
 
+/// Cambia cuando cambia la netlist que se escribe (para las cachés de
+/// resultados, como la del historial del LVS de Riku).
+pub const VERSION: u32 = 1;
+
 /// Cómo escribir la netlist.
 #[derive(Clone, Default)]
 pub struct SpiceOptions {
@@ -109,7 +113,7 @@ impl Symbol {
     /// dibuja; los demás de `extra` son parámetros).
     fn ports(&self, nets: &HashSet<String>) -> Vec<String> {
         let extra = self.props.get("extra").map(|e| e.split_whitespace().filter(|x| nets.contains(*x)).map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
-        self.pins.iter().map(|p| p.name.clone()).chain(extra).collect()
+        self.pins.iter().flat_map(|p| bus_bits(&p.name)).chain(extra).collect()
     }
 
     /// Sus parámetros: los `clave=@clave` de su `format` (sin los pines),
@@ -136,6 +140,13 @@ fn symbol_of(objects: &[Object], lvs: bool) -> Symbol {
             Object::GlobalProperties(p) if p.contains_key("type") || p.contains_key("format") => Some(p.clone()),
             _ => None,
         })
+        // Símbolos del formato viejo: las propiedades en `G {…}`.
+        .or_else(|| {
+            objects.iter().find_map(|o| match o {
+                Object::Vhdl(t) => Some(crate::parser::parse_property_string(t)).filter(|p| p.contains_key("type") || p.contains_key("format")),
+                _ => None,
+            })
+        })
         .unwrap_or_default();
     let format = if lvs { props.get("lvs_format").or(props.get("format")) } else { props.get("format") }.cloned();
     let mut pins: Vec<(Option<i64>, usize, SymPin)> = objects
@@ -157,7 +168,7 @@ fn symbol_of(objects: &[Object], lvs: bool) -> Symbol {
     Symbol {
         kind: props.get("type").cloned().unwrap_or_default(),
         format,
-        template: template_defaults(objects),
+        template: props.get("template").map(|t| crate::parser::parse_property_string(t)).unwrap_or_else(|| template_defaults(objects)),
         props,
         pins: pins.into_iter().map(|(_, _, p)| p).collect(),
     }
@@ -344,7 +355,12 @@ impl<'a> Netlister<'a> {
                 .clone()
         };
 
-        let ports: Vec<String> = labels.iter().filter(|(_, _, r)| *r != "label").map(|(n, _, _)| name(&mut uf, *n)).collect();
+        let mut ports: Vec<String> = Vec::new();
+        for (node, _, role) in &labels {
+            if *role != "label" {
+                ports.extend(bus_bits(&name(&mut uf, *node)));
+            }
+        }
 
         let tcl = self.spice.vars.clone();
         let vars = move |n: &str| tcl.as_ref().and_then(|v| v(n));
@@ -368,13 +384,21 @@ impl<'a> Netlister<'a> {
                 continue;
             }
             let Some(format) = inst.symbol.format.clone() else { continue };
-            let pins: Vec<(String, String)> =
-                inst.symbol.pins.iter().zip(&inst.pin_nodes).map(|(p, &node)| (p.name.clone(), name(&mut uf, node))).collect();
-            let line = expand(&format, &inst.name, &inst.symname, &inst.attrs, params, &pins, &vars);
-            let line = line.trim();
-            if !line.is_empty() {
-                body.push_str(line);
-                body.push('\n');
+            // `x1[3:0]`: cuatro instancias; cada pin toma su parte de la net.
+            let names = bus_bits(&inst.name);
+            let nets: Vec<(String, Vec<String>)> =
+                inst.symbol.pins.iter().zip(&inst.pin_nodes).map(|(p, &node)| (p.name.clone(), bus_bits(&name(&mut uf, node)))).collect();
+            for (k, iname) in names.iter().enumerate() {
+                let pins: Vec<(String, String)> = nets
+                    .iter()
+                    .map(|(pin, bits)| (pin.clone(), slice(bits, bus_bits(pin).len(), k, names.len()).join(" ")))
+                    .collect();
+                let line = expand(&format, iname, &inst.symname, &inst.attrs, params, &pins, &vars);
+                let line = line.trim();
+                if !line.is_empty() {
+                    body.push_str(line);
+                    body.push('\n');
+                }
             }
             if let Some(reference) = &inst.schematic {
                 self.define(&inst.symname, reference, path, &inst.symbol);
@@ -390,7 +414,7 @@ impl<'a> Netlister<'a> {
                 body.push('\n');
             }
         }
-        let nets = net_name.values().cloned().collect();
+        let nets = net_name.values().flat_map(|n| bus_bits(n)).collect();
         Ok(Cell { ports, nets, body })
     }
 
@@ -416,6 +440,63 @@ impl<'a> Netlister<'a> {
             }
             Err(e) => self.warnings.push(e),
         }
+    }
+}
+
+/// Los bits de un nombre de Xschem: `A[3:0]` → `A[3] A[2] A[1] A[0]`,
+/// `A[0:6:2]`, `A[3..0]`, y listas `C3,C2,CIN`. Un nombre sin bus es él
+/// mismo.
+fn bus_bits(name: &str) -> Vec<String> {
+    let name = name.trim();
+    let mut parts = Vec::new();
+    let (mut depth, mut start) = (0, 0);
+    for (i, c) in name.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&name[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&name[start..]);
+    let mut out = Vec::new();
+    for part in parts.into_iter().map(str::trim).filter(|p| !p.is_empty()) {
+        let range = part.find('[').filter(|_| part.ends_with(']')).map(|o| (&part[..o], &part[o + 1..part.len() - 1]));
+        let nums: Option<Vec<i64>> = range.and_then(|(_, r)| {
+            let sep = if r.contains("..") { ".." } else { ":" };
+            r.split(sep).map(|x| x.trim().parse().ok()).collect()
+        });
+        match (range, nums.as_deref()) {
+            (Some((base, _)), Some(&[a, b])) => out.extend(steps(a, b, 1).map(|i| format!("{base}[{i}]"))),
+            (Some((base, _)), Some(&[a, b, st])) if st > 0 => out.extend(steps(a, b, st).map(|i| format!("{base}[{i}]"))),
+            _ => out.push(part.to_string()),
+        }
+    }
+    if out.is_empty() {
+        out.push(name.to_string());
+    }
+    out
+}
+
+/// De `a` a `b` (subiendo o bajando) de a `step`.
+fn steps(a: i64, b: i64, step: i64) -> impl Iterator<Item = i64> {
+    let n = (a - b).abs() / step + 1;
+    (0..n).map(move |k| if a >= b { a - k * step } else { a + k * step })
+}
+
+/// Los bits de una net que le tocan a la instancia `k` de `m` en un pin de
+/// ancho `width`: su parte si la net tiene `width·m` bits, toda si tiene
+/// `width`, y el mismo bit repetido si tiene uno.
+fn slice(bits: &[String], width: usize, k: usize, m: usize) -> Vec<String> {
+    if bits.len() == width * m && m > 1 {
+        bits[k * width..(k + 1) * width].to_vec()
+    } else if bits.len() == 1 && width > 1 {
+        vec![bits[0].clone(); width]
+    } else {
+        bits.to_vec()
     }
 }
 
@@ -610,6 +691,37 @@ N 0 -30 0 -60 {lab=#net1}\n\
 N 0 30 0 60 {lab=#net1}\n";
         let s = netlist(sch, "t.sch", "t", &opts(), SpiceOptions::default(), &|_, _| None).unwrap();
         assert!(s.text.contains("R1 net1 net2 1k\n"), "{}", s.text);
+    }
+
+    #[test]
+    fn buses_e_instancias_vector() {
+        assert_eq!(bus_bits("A[3:0]"), ["A[3]", "A[2]", "A[1]", "A[0]"]);
+        assert_eq!(bus_bits("A[0:4:2],CIN"), ["A[0]", "A[2]", "A[4]", "CIN"]);
+        assert_eq!(bus_bits("B[1..2]"), ["B[1]", "B[2]"]);
+        assert_eq!(bus_bits("x[3]"), ["x[3]"]);
+        let bits = bus_bits("S[3:0]");
+        assert_eq!(slice(&bits, 1, 1, 4), ["S[2]"]);
+        assert_eq!(slice(&["VDD".to_string()], 1, 2, 4), ["VDD"]);
+        assert_eq!(slice(&bits, 4, 0, 1), bits);
+
+        // Cuatro resistores `R[3:0]` entre el bus `a[3:0]` y `b`.
+        let sch = "v {xschem version=3.4.5 file_version=1.2}\n\
+C {res.sym} 0 0 0 0 {name=R[3:0] value=1k}\n\
+C {ipin.sym} 0 -30 0 0 {name=p1 lab=a[3:0]}\n\
+C {ipin.sym} 0 30 0 0 {name=p2 lab=b}\n";
+        let s = netlist(sch, "t.sch", "t", &opts(), SpiceOptions { top_subckt: true, ..Default::default() }, &|_, _| None).unwrap();
+        assert!(s.text.contains(".subckt t a[3] a[2] a[1] a[0] b\n"), "{}", s.text);
+        assert!(s.text.contains("R[3] a[3] b 1k\n"), "{}", s.text);
+        assert!(s.text.contains("R[0] a[0] b 1k\n"), "{}", s.text);
+    }
+
+    #[test]
+    fn simbolo_con_formato_viejo_en_g() {
+        let old = "G {type=resistor\nformat=\"@name @pinlist @value\"\ntemplate=\"name=R1 value=7k\"}\nB 5 -2.5 -32.5 2.5 -27.5 {name=P dir=inout}\nB 5 -2.5 27.5 2.5 32.5 {name=M dir=inout}\n";
+        let opts = RenderOptions::dark().with_symbol_lookup(Arc::new(move |s: &str| (s == "old.sym").then(|| old.to_string())));
+        let sch = "v {xschem version=3.4.5 file_version=1.2}\nC {old.sym} 0 0 0 0 {name=R9}\n";
+        let s = netlist(sch, "t.sch", "t", &opts, SpiceOptions::default(), &|_, _| None).unwrap();
+        assert!(s.text.contains("R9 net1 net2 7k\n"), "{}", s.text);
     }
 
     #[test]
