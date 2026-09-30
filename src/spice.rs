@@ -27,7 +27,7 @@ use crate::scene::{template_defaults, SceneBuilder, Transform};
 
 /// Cambia cuando cambia la netlist que se escribe (para las cachés de
 /// resultados, como la del historial del LVS de Riku).
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// Cómo escribir la netlist.
 #[derive(Clone, Default)]
@@ -59,7 +59,7 @@ pub struct Spice {
 /// La netlist de `text` (el esquemático `path`, de nombre `name`).
 pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: SpiceOptions, lookup: SchematicLookup<'_>) -> Result<Spice, String> {
     let (lvs, top_subckt) = (spice.lvs, spice.top_subckt);
-    let mut n = Netlister { builder: SceneBuilder::new(opts), spice, lookup, defined: BTreeMap::new(), globals: Vec::new(), warnings: Vec::new() };
+    let mut n = Netlister { builder: SceneBuilder::new(opts), spice, lookup, defined: BTreeMap::new(), globals: Vec::new(), models: Vec::new(), warnings: Vec::new() };
     let top = n.cell(text, path, true, &Properties::new())?;
     let mut out = String::new();
     out.push_str(&format!("** {name}\n"));
@@ -86,6 +86,12 @@ pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: 
     for def in n.defined.values().flatten() {
         out.push('\n');
         out.push_str(def);
+    }
+    // Los `device_model` de los símbolos usados, una vez cada uno.
+    for m in &n.models {
+        out.push('\n');
+        out.push_str(m.trim_matches('\n').trim_end());
+        out.push('\n');
     }
     // Las nets globales (`vdd.sym`, `gnd.sym`: `global=true`).
     for g in &n.globals {
@@ -118,7 +124,13 @@ impl Symbol {
     /// dibuja; los demás de `extra` son parámetros).
     fn ports(&self, nets: &HashSet<String>) -> Vec<String> {
         let extra = self.props.get("extra").map(|e| e.split_whitespace().filter(|x| nets.contains(*x)).map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
-        self.pins.iter().flat_map(|p| bus_bits(&p.name)).chain(extra).collect()
+        let mut names: Vec<String> = Vec::new();
+        for p in &self.pins {
+            if !names.contains(&p.name) {
+                names.push(p.name.clone());
+            }
+        }
+        names.iter().flat_map(|n| bus_bits(n)).chain(extra).collect()
     }
 
     /// Sus parámetros: los `clave=@clave` de su `format` (sin los pines),
@@ -200,6 +212,8 @@ struct Netlister<'a> {
     defined: BTreeMap<String, Option<String>>,
     /// Nets globales, en el orden en que aparecen.
     globals: Vec<String>,
+    /// Los `device_model` (modelos o `.subckt` que trae el símbolo).
+    models: Vec<String>,
     warnings: Vec<String>,
 }
 
@@ -260,6 +274,13 @@ impl<'a> Netlister<'a> {
                     node
                 })
                 .collect();
+            // Dos pines con el mismo nombre (`iovdd` en los pads de IHP) son
+            // el mismo nodo.
+            for (i, p) in symbol.pins.iter().enumerate() {
+                if let Some(j) = symbol.pins[..i].iter().position(|q| q.name == p.name) {
+                    uf.union(pin_nodes[i], pin_nodes[j]);
+                }
+            }
             match symbol.kind.as_str() {
                 k @ ("label" | "ipin" | "opin" | "iopin") => {
                     // `global=true` (o `global=ground`, como en IHP): todo menos falso.
@@ -284,7 +305,7 @@ impl<'a> Netlister<'a> {
                 _ => {}
             }
             let schematic = (symbol.kind == "subcircuit")
-                .then(|| attrs.get("schematic").or(symbol.props.get("schematic")).cloned().unwrap_or_else(|| sym_file.replace(".sym", ".sch")));
+                .then(|| symbol.props.get("schematic").cloned().unwrap_or_else(|| sym_file.replace(".sym", ".sch")));
             // `schematic=passgate_1` en la instancia: otro esquemático para
             // este símbolo, y el `.subckt` lleva su nombre.
             let (symname, schematic, base) = match c.properties.get("schematic").map(|s| s.trim()).filter(|s| !s.is_empty() && symbol.kind == "subcircuit") {
@@ -385,7 +406,13 @@ impl<'a> Netlister<'a> {
         }
 
         let tcl = self.spice.vars.clone();
-        let vars = move |n: &str| tcl.as_ref().and_then(|v| v(n));
+        let vars = move |n: &str| {
+            tcl.as_ref().and_then(|v| v(n)).or_else(|| match n {
+                // La carpeta de usuario de Xschem.
+                "USER_CONF_DIR" => std::env::var("HOME").ok().map(|h| format!("{h}/.xschem")),
+                _ => None,
+            })
+        };
         let mut body = String::new();
         let mut commands: Vec<String> = Vec::new();
         let mut header: Vec<String> = Vec::new();
@@ -411,10 +438,21 @@ impl<'a> Netlister<'a> {
                 continue;
             }
             let Some(format) = inst.symbol.format.clone() else { continue };
+            if let Some(model) = inst.attrs.get("device_model").or(inst.symbol.props.get("device_model")) {
+                let model = crate::tcleval::eval_text_with(model, &vars);
+                if !model.trim().is_empty() && !self.models.contains(&model) {
+                    self.models.push(model);
+                }
+            }
             // `x1[3:0]`: cuatro instancias; cada pin toma su parte de la net.
             let names = bus_bits(&inst.name);
-            let nets: Vec<(String, Vec<String>)> =
-                inst.symbol.pins.iter().zip(&inst.pin_nodes).map(|(p, &node)| (p.name.clone(), bus_bits(&name(&mut uf, node)))).collect();
+            // Pines con el mismo nombre: un solo puerto (la primera vez).
+            let mut nets: Vec<(String, Vec<String>)> = Vec::new();
+            for (p, &node) in inst.symbol.pins.iter().zip(&inst.pin_nodes) {
+                if !nets.iter().any(|(q, _)| *q == p.name) {
+                    nets.push((p.name.clone(), bus_bits(&name(&mut uf, node))));
+                }
+            }
             for (k, iname) in names.iter().enumerate() {
                 let pins: Vec<(String, String)> = nets
                     .iter()

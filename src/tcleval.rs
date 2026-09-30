@@ -198,7 +198,8 @@ fn format_number(v: f64) -> String {
     };
     if !(-4..6).contains(&exp) {
         let m = trim(format!("{:.5}", v / 10f64.powi(exp)));
-        format!("{m}e{exp}")
+        // Como Tcl: el exponente con signo y al menos dos cifras (`e-06`).
+        format!("{m}e{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs())
     } else {
         trim(format!("{v:.prec$}", prec = (5 - exp).max(0) as usize))
     }
