@@ -54,12 +54,60 @@ pub type SchematicLookup<'a> = &'a dyn Fn(&str, &str) -> Option<(String, String)
 pub struct Spice {
     pub text: String,
     pub warnings: Vec<String>,
+    /// Dónde está cada net y cada dispositivo del esquemático de arriba.
+    pub places: Places,
+}
+
+/// Dónde está en el esquemático de arriba cada cosa de la netlist, por el
+/// nombre con que aparece en ella (el que da Netgen): para ir de un
+/// resultado del LVS al dibujo.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Places {
+    /// Cada net (`Vout`, `net3`, `A[2]`): sus wires y los pines que toca.
+    pub nets: BTreeMap<String, NetPlace>,
+    /// Cada dispositivo: su nombre en la netlist (`XM1`) → su instancia
+    /// (`M1`, o `x1[2]` en un vector).
+    pub devices: BTreeMap<String, String>,
+    /// El recuadro de cada instancia, `(x1, y1, x2, y2)`: el dibujo de su
+    /// símbolo en el esquemático.
+    pub instances: BTreeMap<String, (f64, f64, f64, f64)>,
+}
+
+/// La geometría de una net en el esquemático.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NetPlace {
+    /// `(x1, y1, x2, y2)` de cada wire.
+    pub wires: Vec<(f64, f64, f64, f64)>,
+    /// Los pines (de instancias y etiquetas) que la tocan.
+    pub pins: Vec<(f64, f64)>,
+}
+
+impl Places {
+    /// La instancia de un dispositivo por su nombre en la netlist o en
+    /// Netgen (que puede no llevar la `X` de los sub-circuitos).
+    pub fn instance(&self, name: &str) -> Option<&str> {
+        self.devices
+            .get(name)
+            .or_else(|| self.devices.get(&format!("X{name}")))
+            .or_else(|| self.devices.get(&format!("x{name}")))
+            .map(String::as_str)
+            .or_else(|| self.devices.values().find(|i| *i == name).map(String::as_str))
+    }
 }
 
 /// La netlist de `text` (el esquemático `path`, de nombre `name`).
 pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: SpiceOptions, lookup: SchematicLookup<'_>) -> Result<Spice, String> {
     let (lvs, top_subckt) = (spice.lvs, spice.top_subckt);
-    let mut n = Netlister { builder: SceneBuilder::new(opts), spice, lookup, defined: BTreeMap::new(), globals: Vec::new(), models: Vec::new(), warnings: Vec::new() };
+    let mut n = Netlister {
+        builder: SceneBuilder::new(opts),
+        spice,
+        lookup,
+        defined: BTreeMap::new(),
+        globals: Vec::new(),
+        models: Vec::new(),
+        places: Places::default(),
+        warnings: Vec::new(),
+    };
     let top = n.cell(text, path, true, &Properties::new())?;
     let mut out = String::new();
     out.push_str(&format!("** {name}\n"));
@@ -98,7 +146,7 @@ pub fn netlist(text: &str, path: &str, name: &str, opts: &RenderOptions, spice: 
         out.push_str(&format!(".GLOBAL {g}\n"));
     }
     out.push_str(".end\n");
-    Ok(Spice { text: out, warnings: n.warnings })
+    Ok(Spice { text: out, warnings: n.warnings, places: n.places })
 }
 
 /// Un pin de un símbolo: su nombre y su centro (coordenadas del símbolo).
@@ -214,6 +262,8 @@ struct Netlister<'a> {
     globals: Vec<String>,
     /// Los `device_model` (modelos o `.subckt` que trae el símbolo).
     models: Vec<String>,
+    /// Dónde está cada cosa del esquemático de arriba.
+    places: Places,
     warnings: Vec<String>,
 }
 
@@ -303,6 +353,13 @@ impl<'a> Netlister<'a> {
                     continue;
                 }
                 _ => {}
+            }
+            if top {
+                if let Some(bb) = symbol_box(&objects, &xf) {
+                    for n in bus_bits(attrs.get("name").map(String::as_str).unwrap_or("")) {
+                        self.places.instances.insert(n, bb);
+                    }
+                }
             }
             let schematic = (symbol.kind == "subcircuit")
                 .then(|| symbol.props.get("schematic").cloned().unwrap_or_else(|| sym_file.replace(".sym", ".sch")));
@@ -460,6 +517,9 @@ impl<'a> Netlister<'a> {
                     .collect();
                 let line = expand(&format, iname, &inst.symname, &inst.attrs, params, &pins, &vars);
                 let line = line.trim();
+                if let Some(spice_name) = line.split_whitespace().next().filter(|_| top) {
+                    self.places.devices.insert(spice_name.to_string(), iname.clone());
+                }
                 if !line.is_empty() {
                     body.push_str(line);
                     body.push('\n');
@@ -474,6 +534,20 @@ impl<'a> Netlister<'a> {
             }
             if let Some((base, reference)) = &inst.base {
                 self.define(base, reference, None, None, path, &inst.symbol);
+            }
+        }
+        // Dónde está cada net de arriba (después de nombrar las de las
+        // instancias, para no cambiar la numeración de las sin nombre).
+        if top {
+            for (i, w) in wires.iter().enumerate() {
+                for bit in bus_bits(&name(&mut uf, i)) {
+                    self.places.nets.entry(bit).or_default().wires.push((w.x1, w.y1, w.x2, w.y2));
+                }
+            }
+            for &(node, p) in &pin_points {
+                for bit in bus_bits(&name(&mut uf, node)) {
+                    self.places.nets.entry(bit).or_default().pins.push(p);
+                }
             }
         }
         // El código SPICE del propio esquemático (`S {…}`, "user
@@ -520,6 +594,24 @@ impl<'a> Netlister<'a> {
             Err(e) => self.warnings.push(e),
         }
     }
+}
+
+/// El recuadro del dibujo de un símbolo ya ubicado (`xf`).
+fn symbol_box(objects: &[Object], xf: &Transform) -> Option<(f64, f64, f64, f64)> {
+    let mut pts: Vec<(f64, f64)> = Vec::new();
+    for o in objects {
+        match o {
+            Object::Line(l) => pts.extend([(l.x1, l.y1), (l.x2, l.y2)]),
+            Object::Rectangle(r) => pts.extend([(r.x1, r.y1), (r.x2, r.y2)]),
+            Object::Polygon(p) => pts.extend(p.points.iter().map(|q| (q.x, q.y))),
+            Object::Arc(a) => pts.extend([(a.center_x - a.radius, a.center_y - a.radius), (a.center_x + a.radius, a.center_y + a.radius)]),
+            _ => {}
+        }
+    }
+    let pts: Vec<(f64, f64)> = pts.into_iter().map(|(x, y)| xf.apply(x, y)).collect();
+    let (x1, y1) = pts.iter().fold((f64::INFINITY, f64::INFINITY), |(a, b), &(x, y)| (a.min(x), b.min(y)));
+    let (x2, y2) = pts.iter().fold((f64::NEG_INFINITY, f64::NEG_INFINITY), |(a, b), &(x, y)| (a.max(x), b.max(y)));
+    (!pts.is_empty()).then_some((x1, y1, x2, y2))
 }
 
 /// Los bits de un nombre de Xschem: `A[3:0]` → `A[3] A[2] A[1] A[0]`,
@@ -801,6 +893,35 @@ C {ipin.sym} 0 30 0 0 {name=p2 lab=b}\n";
         let sch = "v {xschem version=3.4.5 file_version=1.2}\nC {old.sym} 0 0 0 0 {name=R9}\n";
         let s = netlist(sch, "t.sch", "t", &opts, SpiceOptions::default(), &|_, _| None).unwrap();
         assert!(s.text.contains("R9 net1 net2 7k\n"), "{}", s.text);
+    }
+
+    #[test]
+    fn dice_donde_esta_cada_net_y_cada_dispositivo() {
+        let sch = "v {xschem version=3.4.5 file_version=1.2}\n\
+C {res.sym} 0 0 0 0 {name=R1 value=1k}\n\
+C {res.sym} 100 0 0 0 {name=R2 value=2k}\n\
+N 0 30 100 -30 {}\n\
+C {ipin.sym} 0 -30 0 0 {name=p1 lab=in}\n";
+        let s = netlist(sch, "t.sch", "t", &opts(), SpiceOptions::default(), &|_, _| None).unwrap();
+        assert_eq!(s.places.instance("R2"), Some("R2"));
+        // El recuadro de R2: sus pines en (100, ±30), con su cuerpo.
+        let (x1, y1, x2, y2) = s.places.instances["R2"];
+        assert!(x1 <= 97.5 && x2 >= 102.5 && y1 <= -32.5 && y2 >= 32.5, "{:?}", s.places.instances["R2"]);
+        // La net sin nombre entre R1 y R2: su wire y los dos pines.
+        let mid = &s.places.nets["net1"];
+        assert_eq!(mid.wires, [(0.0, 30.0, 100.0, -30.0)]);
+        assert_eq!(mid.pins.len(), 2);
+        assert!(s.places.nets["in"].wires.is_empty());
+        assert!(!s.places.nets["in"].pins.is_empty());
+    }
+
+    #[test]
+    fn netgen_puede_nombrar_sin_la_x() {
+        let mut p = Places::default();
+        p.devices.insert("XM1".into(), "M1".into());
+        assert_eq!(p.instance("XM1"), Some("M1"));
+        assert_eq!(p.instance("M1"), Some("M1"));
+        assert_eq!(p.instance("M9"), None);
     }
 
     #[test]
